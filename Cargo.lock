@@ -35,6 +35,12 @@ dependencies = [
 [[package]]
 name = "automaton-tools"
 version = "0.1.0"
+dependencies = [
+ "automaton-policy",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "automatond"
