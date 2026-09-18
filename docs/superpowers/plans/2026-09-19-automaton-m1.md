@@ -1362,7 +1362,7 @@ impl<P: Provider, G: ApprovalGate> AgentLoop<P, G> {
 
     fn execute_and_record(&self, session: &str, tool: &dyn Tool, call: &ToolCall, history: &mut Vec<Message>, emit: &mut (dyn FnMut(Event) + Send)) {
         emit(Event::ToolStarted { session: session.into(), tool: call.name.clone(), summary: tool.description().to_string() });
-        let result = tool.execute(&call.args).map_err(|e| e.to_string());
+        let result = tool.execute(&call.args).map_err(|e| format!("오류: {e}")); // "오류:" 마커 — 연속 실패 가드(§9)가 실행 실패도 포집 (리뷰 자문)
         let (ok, text) = match result { Ok(s) => (true, s), Err(e) => (false, e) };
         emit(Event::ToolResult { session: session.into(), tool: call.name.clone(), ok, summary: truncate(&text, 400) });
         history.push(Message { role: "tool".into(), content: format!("[{}] {}", call.name, text) });
@@ -2127,7 +2127,7 @@ use automaton_apprentice::Apprentice;
 use automaton_core::{AgentLoop, ApprovalGate, ApprovalOutcome, Provider};
 use automaton_memory::MemoryStore;
 use automaton_policy::{Engine, Rule, VerdictTemplate};
-use automaton_proto::{ActionInfo, Event, Mode, Request};
+use automaton_proto::{ActionInfo, Decision, Event, Mode, Request};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -2160,8 +2160,8 @@ pub struct Daemon {
     apprentice: Apprentice,
     store: MemoryStore,
     sessions: Mutex<HashMap<String, Mode>>,
-    /// 승인 id → 해당 승인 요청의 툴 — "항상 허용"을 툴 스코프로 제한·팬텀 id 차단 (§5)
-    pending_asks: Mutex<HashMap<String, String>>,
+    /// 승인 id → (툴, 타깃) — "항상 허용" 스코프·팬텀 id 차단(§5) + 저널 target 공급(§6, 리뷰 반영)
+    pending_asks: Mutex<HashMap<String, (String, String)>>,
     /// 데몬 전역 승인 id 발급기 — 루프의 턴 로컬 seq 충돌 방지
     approval_seq: std::sync::atomic::AtomicU64,
 }
@@ -2173,7 +2173,7 @@ impl Daemon {
         std::fs::create_dir_all(&paths.config_dir).ok();
         // 정책 합성 시점: 파일이 있으면 파일 전체(granted+rules), 없으면 builtin.
         // grant_always 시 save()가 전체를 내려쓰므로 파일은 항상 완전 상태가 된다.
-        let engine = Engine::from_file(&paths.policy()).unwrap_or_else(|_| Engine::builtin());
+        let engine = Engine::from_file(&paths.policy()).unwrap_or_else(|e| { eprintln!("정책 파일 로드 실패(builtin 폴백, granted 유실 가능): {e}"); Engine::builtin() });
         let store = MemoryStore::open(&paths.memory()).expect("메모리 DB 열기 실패");
         let apprentice = Apprentice::open(&paths.memory()).expect("Apprentice DB 열기 실패");
         Daemon { provider, paths, engine: Mutex::new(engine), apprentice, store, sessions: Mutex::new(HashMap::new()), pending_asks: Mutex::new(HashMap::new()), approval_seq: std::sync::atomic::AtomicU64::new(1) }
@@ -2215,17 +2215,19 @@ impl Daemon {
                     self.sessions.lock().unwrap().insert(session.clone(), to);
                     let _ = tx.send(Event::ModeChanged { session, mode: to });
                 }
-                Request::ApprovalRespond { session, approval, decision: _, always } => {
-                    // 승인 id 검증 + 툴 스코프 규칙 — 팬텀 id·캐치올 Allow 전부 차단 (§5, 실측 보안 결함 반영)
-                    let tool = self.pending_asks.lock().unwrap().get(&approval).cloned();
-                    if tool.is_some() { self.pending_asks.lock().unwrap().remove(&approval); } // 1회용 — 낡은 id 재전송 재실행 방지 (리뷰 자문)
-                    match tool {
-                        Some(tool) if always => {
-                            let mut e = self.engine.lock().unwrap();
-                            e.grant_always(Rule { name: format!("granted-{approval}-{tool}"), tool: Some(tool), app: None, category: None, verdict: VerdictTemplate::Allow });
-                            let _ = e.save(&self.paths.policy());
+                Request::ApprovalRespond { session, approval, decision, always } => {
+                    // 승인 id 검증 + 툴 스코프 + 결정 저널(§5·§6) — 응답 시점에 실제 target으로 기록 (리뷰 반영: FTS는 target만 색인)
+                    let entry = self.pending_asks.lock().unwrap().remove(&approval);
+                    match entry {
+                        Some((tool, target)) => {
+                            let approved = decision == Decision::Approve;
+                            let _ = self.apprentice.note_decision(&session, &ActionInfo { tool: tool.clone(), target: target.clone(), risk: String::new() }, "ask", if approved { "approve" } else { "deny" });
+                            if always && approved { // 거절+항상허용 조합은 Allow 발행 금지 (프로토콜 수비, 리뷰 반영)
+                                let mut e = self.engine.lock().unwrap();
+                                e.grant_always(Rule { name: format!("granted-{approval}-{tool}"), tool: Some(tool), app: None, category: None, verdict: VerdictTemplate::Allow });
+                                let _ = e.save(&self.paths.policy());
+                            }
                         }
-                        Some(_) => { /* 1회성 승인/거절 — Task 14에서 게이트 채널로 전달 */ }
                         None => {
                             let _ = tx.send(Event::Error { session: Some(session), message: format!("발행되지 않은 승인 id: {approval}") });
                         }
@@ -2256,7 +2258,7 @@ impl Daemon {
                 if let Some(h) = self.apprentice.hint_for(action).ok().flatten() {
                     *hint = Some(h); // 힌트는 별도 필드로만 전달 — risk 변형 시 배너 이중 표시 (리뷰 자문)
                 }
-                self.pending_asks.lock().unwrap().insert(approval.clone(), action.tool.clone());
+                self.pending_asks.lock().unwrap().insert(approval.clone(), (action.tool.clone(), action.target.clone()));
             }
             // 2) 감사 로그(§5) — 힌트 부착된 최종 형태 기록 (사후 분석 일관성)
             if let Some(s) = &session {
@@ -2268,20 +2270,7 @@ impl Daemon {
                     }
                 }
             }
-            // 3) 결정 저널(§5·§6) — 이벤트 순서 기반 M1 근사:
-            //    ToolStarted = allow→실행(approve), ToolResult ok:false = 거부(deny)
-            if let Some(s) = &session {
-                match &ev {
-                    Event::ToolStarted { tool, .. } => {
-                        let _ = self.apprentice.note_decision(s, &ActionInfo { tool: tool.clone(), target: String::new(), risk: String::new() }, "allow", "approve");
-                    }
-                    Event::ToolResult { tool, ok: false, .. } => {
-                        let _ = self.apprentice.note_decision(s, &ActionInfo { tool: tool.clone(), target: String::new(), risk: String::new() }, "ask", "deny");
-                    }
-                    _ => {}
-                }
-            }
-            // 4) 소켓 출력
+            // 3) 소켓 출력
             if let Ok(line) = serde_json::to_string(&ev) {
                 let _ = wr.write_all(line.as_bytes()).await;
                 let _ = wr.write_all(b"\n").await;
@@ -2322,7 +2311,7 @@ impl ApprovalGate for DenyGate {
 }
 ```
 
-주의(M1 경계 명시): ① ASK 승인 채널(oneshot 게이트)은 미완 — DenyGate 안전 기본값 + allow/정책거부 경로만 E2E 검증, 승인 왕복은 Chunk 5. ② 결정 저널의 target이 빈 문자열 — proto 이벤트에 target 필드가 없어 힌트 토큰 랭킹이 도구명 기준으로만 동작. Chunk 5에서 이벤트 확장 시 힌트 품질 상승. ③ 1회성 ApprovalRespond(decision만)는 게이트 미연결(Some(_) 분기 noop). ④ doctor의 screencapture 검사는 권한 거부 시에도 exit 0(배경화면만 캡처)일 수 있음 — 오탐 가능성 주석 처리.
+주의(M1 경계 명시): ① ASK 승인 채널(oneshot 게이트)은 미완 — DenyGate 안전 기본값 + allow/정책거부 경로만 E2E 검증, 승인 왕복은 Task 14. ② 결정 저널은 ApprovalRespond 시점 실제 target으로 기록(FTS가 target만 색인하므로 힌트 발화 필수 — 리뷰 반영). allow 경로·게이트 자동 거부는 감사 로그(audit jsonl)로만 남는다. ③ Task 14에서 게이트 채널 연결 시 응답 decision을 그대로 전달한다. ④ doctor의 screencapture 검사는 권한 거부 시에도 exit 0(배경화면만 캡처)일 수 있음 — 오탐 가능성 주석 처리.
 
 
 - [ ] **Step 2: main.rs 구현 (CLI + doctor)**
