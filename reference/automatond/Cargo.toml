@@ -6,3 +6,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+automaton-core = { path = "../../crates/automaton-core" }
+automaton-proto = { path = "../../crates/automaton-proto" }
+automaton-policy = { path = "../../crates/automaton-policy" }
+automaton-memory = { path = "../../crates/automaton-memory" }
+automaton-apprentice = { path = "../../crates/automaton-apprentice" }
+automaton-tools = { path = "../../crates/automaton-tools" }
+serde_json.workspace = true
+tokio.workspace = true
+parking_lot.workspace = true
+async-trait.workspace = true
