@@ -1384,3 +1384,467 @@ Expected: 8 passed.
 ```bash
 git add -A && git commit -m "feat(core): agent loop with policy gate, approval flow, mode profiles"
 ```
+## Chunk 3: automaton-memory + automaton-apprentice 1단계
+
+### Task 7: automaton-memory — SQLite 스토어 (세션·요약·사실·결정)
+
+**Files:**
+- Create: `crates/automaton-memory/src/lib.rs`
+- Test: `crates/automaton-memory/tests/store.rs`
+
+- [ ] **Step 1: 실패 테스트 작성**
+
+`crates/automaton-memory/tests/store.rs`:
+
+```rust
+use automaton_memory::MemoryStore;
+
+fn tmp() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("automaton-memory-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("memory.db")
+}
+
+#[test]
+fn opens_and_creates_schema_with_fts5() {
+    let s = MemoryStore::open(&tmp()).unwrap();
+    // FTS5 가상 테이블이 실제로 동작하는지 확인 (bundled 빌드에 FTS5 없으면 여기서 실패)
+    s.add_fact("caspar는 한국어를 쓴다").unwrap();
+    assert_eq!(s.search_facts("한국어").unwrap().len(), 1);
+}
+
+#[test]
+fn messages_roundtrip_per_session() {
+    let s = MemoryStore::open(&tmp()).unwrap();
+    s.append_message("s1", "user", "안녕").unwrap();
+    s.append_message("s1", "assistant", "안녕하세요").unwrap();
+    s.append_message("s2", "user", "다른 세션").unwrap();
+    let m = s.messages("s1").unwrap();
+    assert_eq!(m.len(), 2);
+    assert_eq!(m[0].content, "안녕");
+}
+
+#[test]
+fn summary_upserts_and_searches() {
+    let s = MemoryStore::open(&tmp()).unwrap();
+    s.save_summary("s1", "다운로드 폴더 정리 작업").unwrap();
+    s.save_summary("s1", "정리 작업 (개정)").unwrap(); // 같은 세션 upsert
+    let hits = s.search_summaries("정리").unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(hits[0].contains("개정"));
+}
+
+#[test]
+fn decisions_record_and_fts_search() {
+    let s = MemoryStore::open(&tmp()).unwrap();
+    for i in 0..3 {
+        s.record_decision("s1", "fs.delete", &format!("~/Downloads/old-{i}.zip"), "ask", "approve").unwrap();
+    }
+    s.record_decision("s2", "fs.delete", "~/Documents/plan.md", "ask", "deny").unwrap();
+    let hits = s.search_decisions("Downloads").unwrap();
+    assert_eq!(hits.len(), 3);
+    assert!(hits.iter().all(|d| d.decision == "approve"));
+}
+```
+
+- [ ] **Step 2: 테스트 실패 확인**
+
+`crates/automaton-memory/Cargo.toml` 의존성 (기존 빈 테이블 교체):
+
+```toml
+automaton-core = { path = "../automaton-core" }   # Message 타입 재사용
+rusqlite = { version = "0.37", features = ["bundled"] }
+thiserror.workspace = true
+```
+
+workspace `[workspace.dependencies]`에 추가: `rusqlite = { version = "0.37", features = ["bundled"] }`, memory Cargo.toml은 `rusqlite.workspace = true`.
+
+Run: `cargo test -p automaton-memory`
+Expected: FAIL — MemoryStore 미정의.
+
+- [ ] **Step 3: lib.rs 구현**
+
+`crates/automaton-memory/src/lib.rs`:
+
+```rust
+//! automaton-memory — 단일 SQLite 스토어: 세션·요약·사실·결정 (§7 메모리 3계층)
+
+use automaton_core::Message;
+use rusqlite::{Connection, Row};
+
+#[derive(Debug, thiserror::Error)]
+pub enum MemoryError {
+    #[error("sqlite: {0}")] Sqlite(#[from] rusqlite::Error),
+    #[error("io: {0}")] Io(#[from] std::io::Error),
+}
+
+pub type Result<T> = std::result::Result<T, MemoryError>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decision {
+    pub session: String,
+    pub tool: String,
+    pub target: String,
+    pub verdict: String,
+    pub decision: String,
+}
+
+pub struct MemoryStore { conn: Connection }
+
+impl MemoryStore {
+    pub fn open(path: &std::path::Path) -> Result<Self> {
+        if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
+        let conn = Connection::open(path)?;
+        conn.execute_batch("
+            PRAGMA journal_mode=WAL;
+            CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, session TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, at TEXT DEFAULT (datetime('now')));
+            CREATE TABLE IF NOT EXISTS summaries(session TEXT PRIMARY KEY, summary TEXT NOT NULL, at TEXT DEFAULT (datetime('now')));
+            CREATE TABLE IF NOT EXISTS facts_fts USING fts5(content);
+            CREATE TABLE IF NOT EXISTS decisions_fts USING fts5(session UNINDEXED, tool UNINDEXED, target, verdict UNINDEXED, decision UNINDEXED);
+        ")?;
+        Ok(MemoryStore { conn })
+    }
+
+    pub fn append_message(&self, session: &str, role: &str, content: &str) -> Result<()> {
+        self.conn.execute("INSERT INTO messages(session, role, content) VALUES (?1, ?2, ?3)", (session, role, content))?;
+        Ok(())
+    }
+
+    pub fn messages(&self, session: &str) -> Result<Vec<Message>> {
+        let mut stmt = self.conn.prepare("SELECT role, content FROM messages WHERE session = ?1 ORDER BY id")?;
+        let rows = stmt.query_map([session], |r: &Row| Ok(Message { role: r.get(0)?, content: r.get(1)? }))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn save_summary(&self, session: &str, summary: &str) -> Result<()> {
+        self.conn.execute("INSERT INTO summaries(session, summary) VALUES (?1, ?2) ON CONFLICT(session) DO UPDATE SET summary = ?2, at = datetime('now')", (session, summary))?;
+        Ok(())
+    }
+
+    pub fn search_summaries(&self, query: &str) -> Result<Vec<String>> {
+        // summaries는 FTS 테이블이 아니므로 LIKE 검색
+        let mut stmt = self.conn.prepare("SELECT summary FROM summaries WHERE summary LIKE ?1")?;
+        let pat = format!("%{query}%");
+        let rows = stmt.query_map([&pat], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn add_fact(&self, content: &str) -> Result<()> {
+        self.conn.execute("INSERT INTO facts_fts(content) VALUES (?1)", (content,))?;
+        Ok(())
+    }
+
+    pub fn search_facts(&self, query: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT content FROM facts_fts WHERE facts_fts MATCH ?1")?;
+        let rows = stmt.query_map([query], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn record_decision(&self, session: &str, tool: &str, target: &str, verdict: &str, decision: &str) -> Result<()> {
+        self.conn.execute("INSERT INTO decisions_fts(session, tool, target, verdict, decision) VALUES (?1, ?2, ?3, ?4, ?5)", (session, tool, target, verdict, decision))?;
+        Ok(())
+    }
+
+    pub fn search_decisions(&self, query: &str) -> Result<Vec<Decision>> {
+        let mut stmt = self.conn.prepare("SELECT session, tool, target, verdict, decision FROM decisions_fts WHERE decisions_fts MATCH ?1")?;
+        let rows = stmt.query_map([fts_escape(query)], |r: &Row| Ok(Decision {
+            session: r.get(0)?, tool: r.get(1)?, target: r.get(2)?, verdict: r.get(3)?, decision: r.get(4)?,
+        }))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+}
+
+/// FTS5 MATCH 이스케이프: 토큰별 접두 와일드카드 AND 결합 — 원시 입력 그대로 MATCH에 넣으면 문법 오류/의도치 않은 연산자 해석 위험
+fn fts_escape(q: &str) -> String {
+    q.split_whitespace().map(|t| format!("{t}*")).collect::<Vec<_>>().join(" ")
+}
+```
+
+주의: `search_facts`에도 동일하게 `fts_escape`를 적용해 `?1` 파라미터를 감쌀 것. `fts_escape`는 lib.rs 비공개 함수로 두고 테스트는 공개 API 경유로만 검증한다.
+
+- [ ] **Step 4: 테스트 통과 확인**
+
+Run: `cargo test -p automaton-memory`
+Expected: 4 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A && git commit -m "feat(memory): sqlite store with fts5 facts and decisions"
+```
+
+### Task 8: 스킬 로더 — SKILL.md 점진적 로딩 (§7)
+
+**Files:**
+- Create: `crates/automaton-memory/src/skills.rs`
+- Modify: `crates/automaton-memory/src/lib.rs` (`pub mod skills; pub use skills::*;`)
+- Test: `crates/automaton-memory/tests/skills.rs`
+
+- [ ] **Step 1: 실패 테스트 작성**
+
+`crates/automaton-memory/tests/skills.rs`:
+
+```rust
+use automaton_memory::SkillIndex;
+
+fn skill_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("automaton-skills-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let s1 = dir.join("organize-downloads");
+    std::fs::create_dir_all(&s1).unwrap();
+    std::fs::write(s1.join("SKILL.md"), "---\nname: organize-downloads\ndescription: 다운로드 폴더를 분류 정리한다\n---\n# 정리 절차\n1. 확장자별 분류\n2. 30일 경과 파일 삭제 제안\n").unwrap();
+    dir
+}
+
+#[test]
+fn scan_extracts_frontmatter_only() {
+    let idx = SkillIndex::scan(&skill_dir()).unwrap();
+    assert_eq!(idx.len(), 1);
+    assert_eq!(idx[0].name, "organize-downloads");
+    assert!(idx[0].description.contains("다운로드"));
+}
+
+#[test]
+fn body_loaded_on_demand_not_in_index() {
+    let idx = SkillIndex::scan(&skill_dir()).unwrap();
+    assert!(!format!("{idx:?}").contains("정리 절차")); // 인덱스에는 본문 없음
+    let body = idx[0].load_body().unwrap();
+    assert!(body.contains("정리 절차"));
+}
+
+#[test]
+fn system_prompt_lines_are_compact() {
+    let idx = SkillIndex::scan(&skill_dir()).unwrap();
+    let lines = idx.system_prompt_lines();
+    assert!(lines[0].contains("organize-downloads"));
+    assert!(lines[0].contains("다운로드 폴더를 분류"));
+}
+```
+
+- [ ] **Step 2: 테스트 실패 확인**
+
+Run: `cargo test -p automaton-memory --test skills`
+Expected: FAIL — SkillIndex 미정의.
+
+- [ ] **Step 3: skills.rs 구현**
+
+`crates/automaton-memory/src/skills.rs`:
+
+```rust
+//! 스킬 로더 (§7) — agentskills.io 호환 폴더/SKILL.md, 점진적 로딩(인덱스엔 이름·설명만).
+
+#[derive(Debug, Clone)]
+pub struct SkillMeta {
+    pub name: String,
+    pub description: String,
+    pub path: std::path::PathBuf,
+}
+
+pub struct SkillIndex { pub skills: Vec<SkillMeta> }
+
+impl SkillIndex {
+    pub fn scan(dir: &std::path::Path) -> std::io::Result<Self> {
+        let mut skills = vec![];
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return Ok(SkillIndex { skills }), // 스킬 디렉터리 없음은 정상
+        };
+        for entry in entries.flatten() {
+            let skill_md = entry.path().join("SKILL.md");
+            let Ok(raw) = std::fs::read_to_string(&skill_md) else { continue };
+            let (name, description) = parse_frontmatter(&raw, &entry.file_name().to_string_lossy());
+            skills.push(SkillMeta { name, description, path: skill_md });
+        }
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(SkillIndex { skills })
+    }
+
+    pub fn len(&self) -> usize { self.skills.len() }
+    pub fn system_prompt_lines(&self) -> Vec<String> {
+        self.skills.iter().map(|s| format!("- {}: {}", s.name, s.description)).collect()
+    }
+}
+
+impl std::ops::Deref for SkillIndex {
+    type Target = [SkillMeta];
+    fn deref(&self) -> &[SkillMeta] { &self.skills }
+}
+
+impl SkillMeta {
+    /// 필요할 때 본문 전체 로드 (점진적 로딩 — §7)
+    pub fn load_body(&self) -> std::io::Result<String> {
+        let raw = std::fs::read_to_string(&self.path)?;
+        Ok(strip_frontmatter(&raw))
+    }
+}
+
+/// 간단 frontmatter 파서: '---' 사이의 'key: value' 라인만 인식 (YAML 의존 없음, M1)
+fn parse_frontmatter(raw: &str, fallback_name: &str) -> (String, String) {
+    let mut name = fallback_name.to_string();
+    let mut description = String::new();
+    let mut in_fm = false;
+    for line in raw.lines() {
+        let t = line.trim();
+        if t == "---" { if in_fm { break; } else { in_fm = true; continue; } }
+        if in_fm {
+            if let Some(v) = t.strip_prefix("name:") { name = v.trim().to_string(); }
+            if let Some(v) = t.strip_prefix("description:") { description = v.trim().to_string(); }
+        }
+    }
+    (name, description)
+}
+
+fn strip_frontmatter(raw: &str) -> String {
+    let mut out = String::new();
+    let mut in_fm = false;
+    let mut seen_first = false;
+    for line in raw.lines() {
+        let t = line.trim();
+        if t == "---" && !seen_first { in_fm = true; seen_first = true; continue; }
+        if t == "---" && in_fm { in_fm = false; continue; }
+        if !in_fm { out.push_str(line); out.push('\n'); }
+    }
+    out
+}
+```
+
+- [ ] **Step 4: 테스트 통과 확인**
+
+Run: `cargo test -p automaton-memory`
+Expected: 7 passed (기존 4 + skills 3).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A && git commit -m "feat(memory): skill loader with progressive frontmatter indexing"
+```
+
+### Task 9: automaton-apprentice — 1단계: 결정 저널 + 유사 결정 힌트 (§6)
+
+**Files:**
+- Create: `crates/automaton-apprentice/src/lib.rs`
+- Test: `crates/automaton-apprentice/tests/hint.rs`
+
+- [ ] **Step 1: 실패 테스트 작성**
+
+`crates/automaton-apprentice/tests/hint.rs`:
+
+```rust
+use automaton_apprentice::Apprentice;
+use automaton_proto::ActionInfo;
+
+fn tmp() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("automaton-apprentice-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("memory.db")
+}
+
+fn info(tool: &str, target: &str) -> ActionInfo {
+    ActionInfo { tool: tool.into(), target: target.into(), risk: String::new() }
+}
+
+#[test]
+fn no_history_yields_no_hint() {
+    let a = Apprentice::open(&tmp()).unwrap();
+    assert!(a.hint_for(&info("fs.delete", "~/Downloads/a.zip")).unwrap().is_none());
+}
+
+#[test]
+fn three_similar_approvals_yield_hint_with_count() {
+    let a = Apprentice::open(&tmp()).unwrap();
+    for i in 0..3 {
+        a.note_decision("s1", &info("fs.delete", &format!("~/Downloads/old-{i}.zip")), "ask", "approve").unwrap();
+    }
+    let h = a.hint_for(&info("fs.delete", "~/Downloads/new.zip")).unwrap();
+    let h = h.expect("히스토리가 있으면 힌트 필요");
+    assert_eq!(h.similar_count, 3);
+    assert!(h.text.contains("승인(3회)"));
+}
+
+#[test]
+fn denials_do_not_count_as_approvals() {
+    let a = Apprentice::open(&tmp()).unwrap();
+    a.note_decision("s1", &info("fs.delete", "~/Documents/x.md"), "ask", "deny").unwrap();
+    a.note_decision("s2", &info("fs.delete", "~/Documents/y.md"), "ask", "deny").unwrap();
+    assert!(a.hint_for(&info("fs.delete", "~/Documents/z.md")).unwrap().is_none());
+}
+
+#[test]
+fn different_tool_does_not_match() {
+    let a = Apprentice::open(&tmp()).unwrap();
+    a.note_decision("s1", &info("fs.write", "~/Downloads/a.txt"), "ask", "approve").unwrap();
+    assert!(a.hint_for(&info("fs.delete", "~/Downloads/b.txt")).unwrap().is_none());
+}
+```
+
+- [ ] **Step 2: 테스트 실패 확인**
+
+`crates/automaton-apprentice/Cargo.toml` 의존성 (기존 빈 테이블 교체):
+
+```toml
+automaton-proto = { path = "../automaton-proto" }
+automaton-memory = { path = "../automaton-memory" }
+serde_json.workspace = true
+thiserror.workspace = true
+```
+
+Run: `cargo test -p automaton-apprentice`
+Expected: FAIL — Apprentice 미정의.
+
+- [ ] **Step 3: lib.rs 구현**
+
+`crates/automaton-apprentice/src/lib.rs`:
+
+```rust
+//! automaton-apprentice 1단계 (§6) — 결정 저널 + 유사 결정 kNN(FTS 근사) 힌트.
+//! 출력은 참고용 어드바이저. Policy Engine을 우회하지 않는다(§6 안전장치 — 루프는 hint를 이벤트에만 싣는다).
+
+use automaton_memory::MemoryStore;
+use automaton_proto::{ActionInfo, Hint};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ApprenticeError {
+    #[error("memory: {0}")] Memory(#[from] automaton_memory::MemoryError),
+}
+
+pub type Result<T> = std::result::Result<T, ApprenticeError>;
+
+pub struct Apprentice { store: MemoryStore }
+
+impl Apprentice {
+    pub fn open(db_path: &std::path::Path) -> Result<Self> {
+        Ok(Apprentice { store: MemoryStore::open(db_path)? })
+    }
+
+    /// 모든 정책 결정 기록 — allow 포함 (§5 감사 데이터가 학습 데이터가 된다)
+    pub fn note_decision(&self, session: &str, action: &ActionInfo, verdict: &str, decision: &str) -> Result<()> {
+        Ok(self.store.record_decision(session, &action.tool, &action.target, verdict, decision)?)
+    }
+
+    /// 유사 과거 승인 검색 → 승인 배너 힌트. 승인만 집계(거절은 힌트 근거 아님).
+    pub fn hint_for(&self, action: &ActionInfo) -> Result<Option<Hint>> {
+        let tokens: Vec<String> = action.target.split(['/', '.', '-', '_', '~']).filter(|t| !t.is_empty() && t.chars().all(char::is_alphanumeric)).map(String::from).collect();
+        let query = tokens.join(" ");
+        if query.trim().is_empty() { return Ok(None); }
+        let hits = self.store.search_decisions(&query)?;
+        let approvals = hits.into_iter().filter(|d| d.decision == "approve" && d.tool == action.tool).count() as u32;
+        if approvals == 0 { return Ok(None); }
+        Ok(Some(Hint { text: format!("지난번 유사 상황에서 승인({approvals}회)"), similar_count: approvals }))
+    }
+}
+```
+
+주의: `use automaton_proto::{ActionInfo, Hint};` — Hint는 proto에 정의됨(Chunk 1). `Verdict as _` 같은 import는 테스트에 불필요하니 작성 시 제외할 것.
+
+- [ ] **Step 4: 테스트 통과 확인**
+
+Run: `cargo test -p automaton-apprentice`
+Expected: 4 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A && git commit -m "feat(apprentice): phase 1 decision journal with fts similarity hints"
+```
