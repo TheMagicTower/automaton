@@ -16,3 +16,16 @@ serde_json.workspace = true
 tokio.workspace = true
 parking_lot.workspace = true
 async-trait.workspace = true
+
+[dev-dependencies]
+automaton-core = { path = "../../crates/automaton-core" }
+automaton-policy = { path = "../../crates/automaton-policy" }
+automaton-proto = { path = "../../crates/automaton-proto" }
+automaton-tools = { path = "../../crates/automaton-tools" }
+automaton-memory = { path = "../../crates/automaton-memory" }
+automaton-apprentice = { path = "../../crates/automaton-apprentice" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true
