@@ -2253,8 +2253,7 @@ impl Daemon {
                 // 승인 id를 데몬 전역 유니크로 재발급 — 루프의 approval_seq가 턴마다 1로 재시작해 낡은 id 충돌 방지 (리뷰 자문)
                 *approval = format!("a{}", self.approval_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
                 if let Some(h) = self.apprentice.hint_for(action).ok().flatten() {
-                    action.risk = format!("{} · {}", action.risk, h.text);
-                    *hint = Some(h);
+                    *hint = Some(h); // 힌트는 별도 필드로만 전달 — risk 변형 시 배너 이중 표시 (리뷰 자문)
                 }
                 self.pending_asks.lock().unwrap().insert(approval.clone(), action.tool.clone());
             }
@@ -2573,7 +2572,7 @@ enum Theme {
 import Foundation
 import Network
 
-enum Mode: String, Codable, Sendable { case code, mac, chat }
+enum Mode: String, Codable, CaseIterable, Sendable { case code, mac, chat }
 
 struct ActionInfo: Codable, Sendable { let tool: String; let target: String; let risk: String }
 struct Hint: Codable, Sendable { let text: String; let similarCount: UInt }
@@ -2610,6 +2609,8 @@ actor DaemonConnection {
     private let socketPath: String
     private var continuation: AsyncStream<ShellEvent>.Continuation?
     private var buffer = Data()
+    private var ready = false
+    private var pendingSends: [String] = [] // 연결 수립 전 송신 큐 — 첫 session_create 유실 방지 (리뷰 이슈 ②)
 
     init(socketPath: String = NSString(string: "~/.local/share/automaton/automatond.sock").expandingTildeInPath) {
         self.socketPath = socketPath
@@ -2623,13 +2624,23 @@ actor DaemonConnection {
     }
 
     private func connect() {
-        let conn = NWConnection(to: .unixPath(socketPath), using: .tcp)
+        let conn = NWConnection(to: .unix(path: socketPath), using: .tcp) // .unix(path:) — unixPath 아님 (실측)
         connection = conn
         conn.stateUpdateHandler = { [weak self] state in
-            if case .failed = state { Task { await self?.handleDisconnect() } }
+            switch state {
+            case .ready: Task { await self?.flushPending() }
+            case .failed: Task { await self?.handleDisconnect() }
+            default: break
+            }
         }
         receiveLoop(conn)
         conn.start(queue: .global(qos: .userInitiated))
+    }
+
+    private func flushPending() {
+        ready = true
+        for json in pendingSends { send(json) }
+        pendingSends.removeAll()
     }
 
     private func handleDisconnect() {
@@ -2642,7 +2653,7 @@ actor DaemonConnection {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, done, error in
             guard let self else { return }
             if let data { Task { await self.consume(data) } }
-            if error == nil && !done { self.receiveLoop(conn) }
+            if error == nil && !done { Task { await self.receiveLoop(conn) } } // #ActorIsolatedCall 경고 방지 (실측)
         }
     }
 
@@ -2657,6 +2668,7 @@ actor DaemonConnection {
     }
 
     func send(_ json: String) {
+        guard ready else { pendingSends.append(json); return } // ready 전 송신은 큐잉 — 조용한 드롭 방지
         guard let conn = connection, let data = (json + "\n").data(using: .utf8) else { return }
         conn.send(content: data, completion: .contentProcessed { _ in })
     }
@@ -2696,8 +2708,9 @@ final class ShellModel {
 
     func start() {
         Task {
-            conn.sendRequest(method: "session_create", params: ["id": session])
-            for await ev in conn.events() {
+            let stream = await conn.events() // 연결 수립을 먼저 확정
+            await conn.sendRequest(method: "session_create", params: ["id": session]) // 송신은 ready 전 큐잉됨
+            for await ev in stream {
                 connected = true
                 apply(ev)
             }
@@ -2718,17 +2731,17 @@ final class ShellModel {
 
     func send(_ text: String) {
         stream.append("\n▸ \(text)")
-        conn.sendRequest(method: "message_send", params: ["session": session, "text": text])
+        Task { await conn.sendRequest(method: "message_send", params: ["session": session, "text": text]) }
     }
 
     /// §5 모드 전환 승인 — 확인 대화상자 후에만 전송 (프로토콜 계약)
     func requestMode(_ to: Mode) {
-        conn.sendRequest(method: "mode_switch", params: ["session": session, "to": to.rawValue])
+        Task { await conn.sendRequest(method: "mode_switch", params: ["session": session, "to": to.rawValue]) }
     }
 
     func respond(approve: Bool, always: Bool) {
         guard let p = pendingApproval else { return }
-        conn.sendRequest(method: "approval_respond", params: ["session": session, "approval": p.id, "decision": approve ? "approve" : "deny", "always": always])
+        Task { await conn.sendRequest(method: "approval_respond", params: ["session": session, "approval": p.id, "decision": approve ? "approve" : "deny", "always": always]) }
         pendingApproval = nil
     }
 }
@@ -2836,9 +2849,9 @@ Expected: FAIL — 현 DenyGate가 ASK를 즉시 거부하므로 ToolResult ok:f
 `daemon.rs` 수정:
 1. `SessionGate` 도입 — `pending: Mutex<HashMap<String, oneshot::Sender<automaton_proto::Decision>>>` (키: 툴명, 세션당 직렬 승인 가정). `#[async_trait] impl ApprovalGate for Arc<SessionGate>`: `decide()`에서 채널 생성·등록 후 `rx.await` — Approve→Approve, 그 외→Deny.
 2. `Daemon`에 `gate: Arc<SessionGate>` 필드 추가, `run_session`의 `DenyGate`를 `self.gate.clone()`으로 교체.
-3. `handle()`의 `ApprovalRespond` `Some(_)` 분기: `pending_asks`에서 툴 역산 → `gate.pending.remove(&tool)`의 tx에 decision 전송.
+3. `handle()`의 `ApprovalRespond` 양 분기 모두 게이트 해제: `pending_asks`에서 툴 역산 → `gate.pending.remove(&tool)`의 tx에 decision 전송. `always=true`는 grant_always 후 **Approve 전송 필수** — grant만 하고 채널을 해제하지 않으면 "항상 허용" 승인 턴이 대기에 걸린다(리뷰 자문).
 
-주의: 동일 툴 동시 ASK는 M1에서 직렬 처리된다(프로토콜 단순성 — 세션당 1 진행). 게이트 대기 중 세션 종료 시 rx 드롭으로 Deny 복귀(안전 방향).
+주의: 게이트 키가 툴명이라 세션 간 동일 툴 동시 ASK 시 이전 tx 드롭(자동 Deny — 안전 방향)·타 세션 응답이 게이트를 해제할 수 있다. M1은 '세션당 직렬 승인' 가정이며 다중 세션 동시 승인은 키에 세션 포함 재설계(후속). 게이트 대기 중 세션 종료 시 rx 드롭으로 Deny 복귀(안전 방향).
 
 - [ ] **Step 3: 테스트 통과 확인**
 
