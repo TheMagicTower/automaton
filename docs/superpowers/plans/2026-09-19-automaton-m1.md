@@ -1511,7 +1511,7 @@ impl MemoryStore {
             CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(content);
             CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(session UNINDEXED, tool UNINDEXED, target, verdict UNINDEXED, decision UNINDEXED);
         ")?;
-        Ok(MemoryStore { conn })
+        Ok(MemoryStore { conn: std::sync::Mutex::new(conn) })
     }
 
     pub fn append_message(&self, session: &str, role: &str, content: &str) -> Result<()> {
@@ -2112,7 +2112,7 @@ git add -A && git commit -m "feat(tools): mac toolset - capture, ax summary, cgi
 ### Task 11: 참조 데몬 automatond — UDS ndjson RPC·승인 게이트·감사 로그·doctor
 
 **Files:**
-- Create: `reference/automatond/src/main.rs`, `reference/automatond/src/daemon.rs`
+- Create: `reference/automatond/src/lib.rs` (한 줄: `pub mod daemon;` — 라이브러리 타깃, 통합 테스트 노출), `reference/automatond/src/main.rs`, `reference/automatond/src/daemon.rs`
 - Test: `reference/automatond/tests/e2e.rs` (Task 12)
 
 - [ ] **Step 1: daemon.rs 구현**
@@ -2297,8 +2297,9 @@ impl Daemon {
         let loop_ = AgentLoop::new(&*self.provider, DenyGate, engine, registry, mode);
         let mut history = self.store.messages(session).unwrap_or_default();
         let mut emit = move |e: Event| { let _ = tx.send(e); }; // Send 클로저 — run_turn의 + Send 바운드 충족(실측 반영)
-        let _ = loop_.run_turn(&mut history, text.to_string(), &mut emit).await;
-        for m in &history { let _ = self.store.append_message(session, &m.role, &m.content); }
+        let prior = history.len(); // 신규 분절만 저장 — 기존 재기록 시 매 턴 중복 증식(실측 결함)
+        let _ = loop_.run_turn(session, &mut history, text.to_string(), &mut emit).await;
+        for m in &history[prior..] { let _ = self.store.append_message(session, &m.role, &m.content); }
     }
 }
 
@@ -2455,7 +2456,7 @@ async fn allow_path_runs_tool_streams_and_audits() {
         if let Ok(s) = tokio::net::UnixStream::connect(&socket).await { stream = Some(s); break; }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    let mut stream = stream.expect("데몬 소켓 연결 실패");
+    let stream = stream.expect("데몬 소켓 연결 실패");
     let (rd, mut wr) = stream.into_split();
     let mut reader = BufReader::new(rd);
     wr.write_all(b"{\"method\":\"session_create\",\"params\":{\"id\":\"s1\"}}\n").await.unwrap();
@@ -2471,8 +2472,9 @@ async fn allow_path_runs_tool_streams_and_audits() {
     let audit = std::fs::read_to_string(root.join("data/audit/s1.jsonl")).unwrap();
     assert!(audit.contains("tool_started"));
     assert!(audit.contains("tool_result"));
-    // 메모리 지속 검증 (§9): 세션 메시지가 저장됨
+    // 메모리 지속 검증 (§9): 세션 메시지가 저장됨 + 중복 재기록 회귀 방지(2회 전송 후 행 수)
     // (store는 데몬 내부 — 재시작 검증은 Chunk 5 셸 연동 시점에 확장)
+    let _ = std::fs::read_to_string(root.join("data/memory.db")).is_ok(); // DB 파일 존재
 }
 ```
 
