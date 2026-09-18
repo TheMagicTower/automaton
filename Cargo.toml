@@ -25,3 +25,4 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 async-trait = "0.1"
 parking_lot = "0.12"
+rusqlite = { version = "0.37", features = ["bundled"] }
