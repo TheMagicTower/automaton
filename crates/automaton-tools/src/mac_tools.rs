@@ -2,6 +2,7 @@
 //! - capture.screen: 시스템 `screencapture` CLI 브리지 (파일 저장 후 경로 반환)
 //! - ax.read: `osascript -l JavaScript` 브리지로 최전면 앱·윈도우 제목 JSON 반환
 //! - input.click / input.type: core-graphics CGEvent (type은 pbcopy+Cmd+V — 한글 등 유니코드 지원, 클립보드 덮어씀 주의)
+//! - 민감 target 규약: target에 요소 역할(AxRole) 또는 이름을 포함 — 'SecureTextField'/'Password' 부분문자열은 정책 하드 거부 대상
 
 use crate::{Tool, ToolError};
 use automaton_policy::Category;
@@ -64,9 +65,9 @@ impl Tool for AxRead {
 pub struct InputClick;
 impl Tool for InputClick {
     fn name(&self) -> &'static str { "input.click" }
-    fn description(&self) -> &'static str { "좌표 (x,y)를 좌클릭" }
+    fn description(&self) -> &'static str { "좌표 (x,y)를 좌클릭 — 대상 요소의 AX 역할·이름을 target 인자로 전달해야 정책 엔진이 민감 필드(비밀번호 등)를 검사할 수 있다" }
     fn parameters_schema(&self) -> Value {
-        serde_json::json!({"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"app":{"type":"string"}},"required":["x","y"]})
+        serde_json::json!({"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"app":{"type":"string"},"target":{"type":"string","description":"대상 UI 요소의 역할/이름(예: button 'Delete', SecureTextField). 민감 입력 필드 식별에 필수"}},"required":["x","y"]})
     }
     fn category(&self, _args: &Value) -> Category { Category::Input }
     fn execute(&self, args: &Value) -> Result<String, ToolError> {
@@ -88,9 +89,9 @@ impl Tool for InputClick {
 pub struct InputType;
 impl Tool for InputType {
     fn name(&self) -> &'static str { "input.type" }
-    fn description(&self) -> &'static str { "클립보드 붙여넣기로 텍스트 입력 (한글 지원, 클립보드 덮어씀)" }
+    fn description(&self) -> &'static str { "클립보드 붙여넣기로 텍스트 입력 (한글 지원, 클립보드 덮어씀) — 대상 요소의 AX 역할·이름을 target 인자로 전달해야 정책 엔진이 민감 필드(비밀번호 등)를 검사할 수 있다" }
     fn parameters_schema(&self) -> Value {
-        serde_json::json!({"type":"object","properties":{"text":{"type":"string"},"app":{"type":"string"}},"required":["text"]})
+        serde_json::json!({"type":"object","properties":{"text":{"type":"string"},"app":{"type":"string"},"target":{"type":"string","description":"대상 UI 요소의 역할/이름(예: SecureTextField, Password). 민감 입력 필드 식별에 필수"}},"required":["text"]})
     }
     fn category(&self, _args: &Value) -> Category { Category::Input }
     fn execute(&self, args: &Value) -> Result<String, ToolError> {
