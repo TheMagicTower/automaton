@@ -106,3 +106,6 @@ impl MemoryStore {
 fn fts_escape(q: &str) -> String {
     q.split_whitespace().map(|t| format!("\"{}\"*", t.replace('"', "\"\""))).collect::<Vec<_>>().join(" ")
 }
+
+pub mod skills;
+pub use skills::*;
