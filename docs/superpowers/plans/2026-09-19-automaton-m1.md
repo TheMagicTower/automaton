@@ -1497,7 +1497,7 @@ pub struct Decision {
     pub decision: String,
 }
 
-pub struct MemoryStore { conn: std::sync::Mutex<Connection> } // Mutex — rusqlite Connection이 !Sync라 Arc<Daemon> 스폰을 위해 Sync화 (Chunk 4 리뷰 반영)
+pub struct MemoryStore { conn: parking_lot::Mutex<Connection> } // parking_lot — 즉시 unwrap 락은 rs-parking-lot 룰 적용 + rusqlite Connection !Sync의 Sync화 (실행 중 계정: rule://rs-parking-lot 실증)
 
 impl MemoryStore {
     pub fn open(path: &std::path::Path) -> Result<Self> {
@@ -1511,7 +1511,7 @@ impl MemoryStore {
             CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(content);
             CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(session UNINDEXED, tool UNINDEXED, target, verdict UNINDEXED, decision UNINDEXED);
         ")?;
-        Ok(MemoryStore { conn: std::sync::Mutex::new(conn) })
+        Ok(MemoryStore { conn: parking_lot::Mutex::new(conn) })
     }
 
     pub fn append_message(&self, session: &str, role: &str, content: &str) -> Result<()> {
@@ -2130,7 +2130,7 @@ use automaton_policy::{Engine, Rule, VerdictTemplate};
 use automaton_proto::{ActionInfo, Decision, Event, Mode, Request};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex; // 즉시 unwrap 락 — rs-parking-lot 룰. async 채널은 tokio::sync 유지
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
@@ -2849,7 +2849,7 @@ Expected: FAIL — 현 DenyGate가 ASK를 즉시 거부하므로 ToolResult ok:f
 - [ ] **Step 2: 데몬 게이트 연결**
 
 `daemon.rs` 수정:
-1. `SessionGate` 도입 — `pending: Mutex<HashMap<String, oneshot::Sender<automaton_proto::Decision>>>` (키: 툴명, 세션당 직렬 승인 가정). 구현은 **로컬 타입에 직접**: `#[async_trait] impl ApprovalGate for SessionGate` (SessionGate는 데몬 로컬 타입이라 고아 규칙 허용 — `impl ApprovalGate for Arc<SessionGate>`는 E0117 오류, 실측). `decide()`에서 채널 생성·등록 후 `rx.await` — Approve→Approve, 그 외→Deny.
+1. `SessionGate` 도입 — `pending: parking_lot::Mutex<HashMap<String, oneshot::Sender<automaton_proto::Decision>>>` (키: 툴명, 세션당 직렬 승인 가정; rs-parking-lot 룰 적용). 구현은 **로컬 타입에 직접**: `#[async_trait] impl ApprovalGate for SessionGate` (SessionGate는 데몬 로컬 타입이라 고아 규칙 허용 — `impl ApprovalGate for Arc<SessionGate>`는 E0117 오류, 실측). `decide()`에서 채널 생성·등록 후 `rx.await` — Approve→Approve, 그 외→Deny.
 2. automaton-core(Chunk 2 loop_.rs의 Box<G> blanket 옆)에 `Arc<G>` blanket 추가 — trait이 core 로컬이라 허용됨:
 
 ```rust
