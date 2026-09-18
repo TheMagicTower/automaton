@@ -9,4 +9,5 @@ repository.workspace = true
 automaton-policy = { path = "../automaton-policy" }
 serde.workspace = true
 serde_json.workspace = true
+core-graphics.workspace = true
 thiserror.workspace = true

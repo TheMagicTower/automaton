@@ -1,9 +1,11 @@
-//! automaton-tools — 툴 trait·레지스트리·coding 툴 (§4 Tool Registry)
+//! automaton-tools — 툴 trait·레지스트리·coding/mac 툴 (§4 Tool Registry, §5 툴셋)
 
 pub mod fs_tools;
 pub use fs_tools::*;
 pub mod shell;
 pub use shell::*;
+pub mod mac_tools;
+pub use mac_tools::*;
 
 use automaton_policy::Category;
 
@@ -31,7 +33,17 @@ impl Registry {
         self.tools.iter().map(|t| t.as_ref() as &dyn Tool).find(|t| t.name() == name)
     }
     pub fn names(&self) -> Vec<&'static str> { self.tools.iter().map(|t| t.name()).collect() }
-    /// 모드 툴셋 (§5) — chunk 4에서 mac 툴 추가
+    /// mac 모드 툴셋 (§5)
+    pub fn mac_set() -> Self {
+        let mut r = Registry::new();
+        r.register(Box::new(CaptureScreen));
+        r.register(Box::new(AxRead));
+        r.register(Box::new(InputClick));
+        r.register(Box::new(InputType));
+        r.register(Box::new(ShellExec));
+        r
+    }
+    /// coding 모드 툴셋 (§5)
     pub fn coding_set() -> Self {
         let mut r = Registry::new();
         r.register(Box::new(FsRead));
