@@ -12,6 +12,7 @@
 - 미려한 네이티브 UI (Brass & Glass — 다크 월넛 + 황동 + 세리프, 기본 테마)
 - 모든 상태·자격증명은 로컬 (온디바이스)
 - **조립 가능한 베이스**: 제3자가 크레이트를 조합해 자신만의 하네스를 코드 수준에서 구축
+- **음성 대화**: 글로벌 핫키/웨이크워드로 말하고 듣는 조작(자비스급 대화를 목표, §12 단계 로드맵)
 
 ### 비목표
 - macOS 외 플랫폼, 멀티유저, 원격 호스팅
@@ -30,7 +31,7 @@
 
 - 조립이 코드 수준에서 가능하려면 모든 개인화 포인트(모드 정의, 정책 규칙, 툴, 프롬프트, 테마)가 베이스에서 **trait·빌더·설정 파일 인터페이스**로 노출되어야 한다. 이것이 이원화의 실현 조건이다.
 - 참조 구현(`automatond`·기본 SwiftUI 앱)은 베이스 사용법을 보여주는 동작 예제이자 그 자체로 쓸 수 있는 기본 하네스다.
-- 생태계 경로: 제3자가 베이스 크레이트 위에 자신의 코어·스킬·테마·모드 팩을 만들고 공유(agentskills.io 호환 + 테마/모드 팩 표준). 베이스 개선이 모든 파생 하네스로 회수됨.
+- **단일 모노리포**: 베이스는 하나의 저장소(Rust 워크스페이스)로 제공 — clone 한 번으로 참조 데몬·Swift 앱을 빌드·실행할 수 있고 `cargo install --git` 설치를 지원해 퍼가기 진입장벽을 최소화한다. 생태계 경로: 제3자가 베이스 크레이트 위에 자신의 코어·스킬·테마·모드 팩을 만들고 공유(agentskills.io 호환 + 테마/모드 팩 표준). 베이스 개선이 모든 파생 하네스로 회수됨.
 - 개인 메모리 DB(`~/.local/share/automaton/`)는 어떤 저장소에도 커밋되지 않는다.
 
 ## 3. 핵심 결정
@@ -56,7 +57,7 @@ Rust 코어 데몬 (참조 구현: automatond / 개인: automaton-personal이 �
   Agent Loop            tool-calling 루프 · 스트리밍 · 컨텍스트 압축
   Policy Engine         결정론적 위험 판정 → ALLOW/ASK/DENY (최종 권한)
   Providers             OpenAI 호환 HTTP 클라이언트 · 기존 키 재사용
-  Tool Registry         coding(fs·shell·edit·grep·lsp) / mac(capture·AX·click·type)
+  Tool Registry         coding(fs·shell·edit·grep·lsp) / mac(capture·AX·click·type·제한 셸)
   Memory · Skills       SQLite + FTS5 + sqlite-vec, 마크다운 스킬
   Apprentice Engine     Decision Journal · 임베딩 서비스 · Draft Composer
         ↕ macOS API
@@ -80,7 +81,7 @@ Accessibility API(AXUIElement) · ScreenCaptureKit · CGEvent
 
 - 모드 전환: 사용자 명시(단축키·명령) 또는 에이전트 요청 → 전환 자체가 승인 이벤트. 에이전트가 자율적으로 자율성을 높이는 것을 원천 차단.
 - 권한 흐름: 툴 호출 → Policy Engine(규칙 평가) → ALLOW(즉시 실행) / ASK(승인 배너, Apprentice 힌트 표시, 승인·거절·항상 허용) / DENY(거절 사유 반환).
-- 위험 분류 기본값 — ALLOW: 캡처, AX 읽기, 파일 읽기·검색, code 모드 편집·빌드. ASK: mac 모드 셸, 파일 삭제/이동, 시스템 설정, 미등록 앱 클릭·타이핑, 모드 전환, 외부 전송·결제 전 전부. DENY: 민감 영역(비밀번호 필드·뱅킹 앱 등) 화이트리스트 밖, 금지 목록.
+- 위험 분류 기본값 — ALLOW: 캡처, AX 읽기, 파일 읽기·검색, code 모드 편집·빌드. ASK: mac 모드 셸(허용 명령 allowlist는 구현 계획에서 정의), 파일 삭제/이동, 시스템 설정, 미등록 앱 클릭·타이핑, 모드 전환, 외부 전송·결제 전 전부. DENY: 금지 목록 + 민감 영역(비밀번호 필드·뱅킹 앱 등)은 **소유자가 명시적으로 화이트리스트에 등록한 경우에만 허용, 기본 거부**.
 - "항상 허용"은 규칙 단위로 정책 파일에 기록(감사 가능, 언제든 철회). 학습 힌트와 달리 이 파일이 권한의 원천이다.
 - 모든 정책 결정(allow 포함)은 감사 로그 + Decision Journal에 기록되어 Apprentice 학습 데이터가 된다.
 
@@ -117,6 +118,7 @@ Accessibility API(AXUIElement) · ScreenCaptureKit · CGEvent
 - 보조 메인 윈도우: 세션 히스토리, 메모리 브라우저, 정책 파일 편집, 설정.
 - 비주얼: 다크 월넛(#1a1611 계열) 배경 + 황동(#b08d57/#c9a227) 액센트 + 세리프 제목(Georgia 계열). 가독성 유지, 다크 모드 자연스러움.
 - 테마는 파일로 정의되어 교체 가능(개인 하네스·제3자 팩 모두). 글로벌 단축키·오버레이 프리뷰(mac 모드에서 조작 대상 하이라이트).
+- 음성 입출력은 §12. 셸 기능으로 구현(코어 프로토콜은 텍스트 유지).
 
 ## 9. 데이터 흐름·에러 처리
 
@@ -135,6 +137,7 @@ Accessibility API(AXUIElement) · ScreenCaptureKit · CGEvent
 - Agent Loop: mock provider로 녹화된 툴콜 시퀀스 재생 → headless CI 검증.
 - AX·ScreenCaptureKit 실기기 테스트: 권한 필요, 로컬 전용 통합 테스트로 분리.
 - 보안: 키는 Keychain(디스크 평문 없음), 감사 로그 무결성.
+- SwiftUI 셸: 스모크 수준(주요 플로우 자동화·수동 체크리스트)이라도 계획에 포함.
 
 ## 11. 기술 스택·레이아웃 (초기)
 
@@ -144,7 +147,23 @@ Accessibility API(AXUIElement) · ScreenCaptureKit · CGEvent
 - **개인 저장소(비공개)**: `automaton-personal` — 베이스 크레이트(git 의존성)로 내 코어를 조립하는 바이너리: 개인 모드·정책 프리셋·커스텀 툴·성격 프롬프트. 설정·스킬은 `~/.config/automaton/`에 배포.
 - 라이선스: MIT OR Apache-2.0
 
-## 12. 참고
+## 12. 음성 대화 (자비스 로드맵)
+
+핵심 구조 결정: **음성은 셸(클라이언트) 기능이다.** 코어 데몬·JSON-RPC 프로토콜은 텍스트를 유지하고, Swift 셸이 오디오 파이프라인(마이크 캡처·VAD·STT·TTS 재생)을 담당한다. 음성을 얹어도 코어·학습·권한 구조가 그대로 재사용된다.
+
+검토 결론(2026-09 기준 부품 모두 성숙):
+- **STT** — whisper.cpp(Rust 바인딩 whisper-rs) + Silero VAD, 온디바이스 한국어 우수. 대안: Apple Speech Framework(무료·온디바이스).
+- **TTS** — Piper 1.7(ONNX, 한국어 보이스, Apple Silicon 실측 양호). 스트리밍 청크 재생으로 체감 지연 절감.
+- **웨이크워드** — openWakeWord(ONNX), "automaton" 커스텀 워드 학습 가능.
+
+단계 로드맵 (Apprentice와 동일한 게이트 방식):
+1. **PTT 대화** — 글로벌 핫키 push-to-talk → STT → 기존 에이전트 루프 → TTS 스트리밍. 체감 지연 목표 1.5s 이내(스트리밍 병렬화로 달성). 승인 배너 음성 낭독 포함.
+2. **상시청각 + 바지인** — 웨이크워드 상시 감지, 말하기 시작하면 TTS 즉시 중단(VAD 바지인), 승인을 음성으로("응"/"아니") 응답.
+3. **자비스급 실험** — realtime speech-to-speech API 경로 추가(지연 500ms 목표). 온디바이스 풀듀플렉스는 이 단계에서 재평가.
+
+프라이버시: STT·TTS 기본 온디바이스. 클라우드 음성 API는 명시적 선택 시에만(3단계).
+
+## 13. 참고
 
 - OpenClaw — 신뢰 게이트웨이·결정론적 정책 철학, 스킬/플러그인 구조
 - Hermes Agent (Nous Research) — 큐레이션 메모리, 자기개선 스킬 루프 패턴
