@@ -159,9 +159,11 @@ Accessibility API(AXUIElement) · ScreenCaptureKit · CGEvent
 단계 로드맵 (Apprentice와 동일한 게이트 방식):
 1. **PTT 대화** — 글로벌 핫키 push-to-talk → STT → 기존 에이전트 루프 → TTS 스트리밍. 체감 지연 목표 1.5s 이내(스트리밍 병렬화로 달성). 승인 배너 음성 낭독 포함.
 2. **상시청각 + 바지인** — 웨이크워드 상시 감지, 말하기 시작하면 TTS 즉시 중단(VAD 바지인), 승인을 음성으로("응"/"아니") 응답.
-3. **자비스급 실험** — realtime speech-to-speech API 경로 추가(지연 500ms 목표). 온디바이스 풀듀플렉스는 이 단계에서 재평가.
+3. **자비스급 실험** — realtime speech-to-speech API 경로 추가(지연 500ms 목표). 이 단계에서도 셸이 오디오 세션을 맡고 함수 호출만 텍스트 JSON-RPC로 코어에 브리징해 "코어 프로토콜 텍스트 유지" 원칙은 그대로 성립. 온디바이스 풀듀플렉스는 이 단계에서 재평가.
 
 프라이버시: STT·TTS 기본 온디바이스. 클라우드 음성 API는 명시적 선택 시에만(3단계).
+
+계획 스코프: 첫 구현 계획은 코어+Swift 셸+3모드+Apprentice 1단계까지. 음성(PTT 포함)은 별도 후속 계획으로 분리하며, whisper.cpp를 Swift C API로 직접 호출할지 Rust 헬퍼를 둘지는 그 계획에서 확정한다.
 
 ## 13. 참고
 
