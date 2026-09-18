@@ -1,14 +1,9 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! automaton-core — 에이전트 루프·모드 프로파일·프로바이더 (§4)
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod loop_;
+pub mod mode;
+pub mod provider;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use loop_::*;
+pub use mode::*;
+pub use provider::*;
