@@ -2173,7 +2173,12 @@ impl Daemon {
         std::fs::create_dir_all(&paths.config_dir).ok();
         // 정책 합성 시점: 파일이 있으면 파일 전체(granted+rules), 없으면 builtin.
         // grant_always 시 save()가 전체를 내려쓰므로 파일은 항상 완전 상태가 된다.
-        let engine = Engine::from_file(&paths.policy()).unwrap_or_else(|e| { eprintln!("정책 파일 로드 실패(builtin 폴백, granted 유실 가능): {e}"); Engine::builtin() });
+        let engine = Engine::from_file(&paths.policy()).unwrap_or_else(|e| {
+            if !matches!(&e, automaton_policy::PolicyError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound) {
+                eprintln!("정책 파일 손상(builtin 폴백, granted 유실 가능): {e}"); // NotFound(첫 실행)는 무음 (리뷰 자문)
+            }
+            Engine::builtin()
+        });
         let store = MemoryStore::open(&paths.memory()).expect("메모리 DB 열기 실패");
         let apprentice = Apprentice::open(&paths.memory()).expect("Apprentice DB 열기 실패");
         Daemon { provider, paths, engine: Mutex::new(engine), apprentice, store, sessions: Mutex::new(HashMap::new()), pending_asks: Mutex::new(HashMap::new()), approval_seq: std::sync::atomic::AtomicU64::new(1) }
@@ -2404,8 +2409,9 @@ impl Provider for Scripted {
     }
 }
 
-fn tmp_root() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("automaton-e2e-{}", std::process::id()));
+fn tmp_root(name: &str) -> PathBuf {
+    // 테스트별 고유 루트 — pid 공유 시 두 E2E가 같은 data/memory.db를 동시 open해 'database is locked' (실측 6/6 실패)
+    let dir = std::env::temp_dir().join(format!("automaton-e2e-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
@@ -2426,7 +2432,7 @@ async fn read_events(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>, un
 
 #[tokio::test]
 async fn allow_path_runs_tool_streams_and_audits() {
-    let root = tmp_root();
+    let root = tmp_root("allow_path");
     let paths = Paths { data_dir: root.join("data"), config_dir: root.join("config") };
     let dir = root.join("work");
     std::fs::create_dir_all(&dir).unwrap();
@@ -2648,7 +2654,8 @@ actor DaemonConnection {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, done, error in
             guard let self else { return }
             if let data { Task { await self.consume(data) } }
-            if error == nil && !done { Task { await self.receiveLoop(conn) } } // #ActorIsolatedCall 경고 방지 (실측)
+            if error != nil || done { Task { await self.handleDisconnect() } } // clean EOF도 종료 처리 — 무한 대기 방지 (리뷰 자문)
+            else { Task { await self.receiveLoop(conn) } } // #ActorIsolatedCall 경고 방지 (실측)
         }
     }
 
@@ -2842,11 +2849,20 @@ Expected: FAIL — 현 DenyGate가 ASK를 즉시 거부하므로 ToolResult ok:f
 - [ ] **Step 2: 데몬 게이트 연결**
 
 `daemon.rs` 수정:
-1. `SessionGate` 도입 — `pending: Mutex<HashMap<String, oneshot::Sender<automaton_proto::Decision>>>` (키: 툴명, 세션당 직렬 승인 가정). `#[async_trait] impl ApprovalGate for Arc<SessionGate>`: `decide()`에서 채널 생성·등록 후 `rx.await` — Approve→Approve, 그 외→Deny.
-2. `Daemon`에 `gate: Arc<SessionGate>` 필드 추가, `run_session`의 `DenyGate`를 `self.gate.clone()`으로 교체.
-3. `handle()`의 `ApprovalRespond` 양 분기 모두 게이트 해제: `pending_asks`에서 툴 역산 → `gate.pending.remove(&tool)`의 tx에 decision 전송. `always=true`는 grant_always 후 **Approve 전송 필수** — grant만 하고 채널을 해제하지 않으면 "항상 허용" 승인 턴이 대기에 걸린다(리뷰 자문).
+1. `SessionGate` 도입 — `pending: Mutex<HashMap<String, oneshot::Sender<automaton_proto::Decision>>>` (키: 툴명, 세션당 직렬 승인 가정). 구현은 **로컬 타입에 직접**: `#[async_trait] impl ApprovalGate for SessionGate` (SessionGate는 데몬 로컬 타입이라 고아 규칙 허용 — `impl ApprovalGate for Arc<SessionGate>`는 E0117 오류, 실측). `decide()`에서 채널 생성·등록 후 `rx.await` — Approve→Approve, 그 외→Deny.
+2. automaton-core(Chunk 2 provider.rs의 Box blanket 옆)에 `Arc<G>` blanket 추가 — trait이 core 로컬이라 허용됨:
 
-주의: 게이트 키가 툴명이라 세션 간 동일 툴 동시 ASK 시 이전 tx 드롭(자동 Deny — 안전 방향)·타 세션 응답이 게이트를 해제할 수 있다. M1은 '세션당 직렬 승인' 가정이며 다중 세션 동시 승인은 키에 세션 포함 재설계(후속). 게이트 대기 중 세션 종료 시 rx 드롭으로 Deny 복귀(안전 방향).
+```rust
+#[async_trait::async_trait]
+impl<G: ApprovalGate + ?Sized> ApprovalGate for std::sync::Arc<G> {
+    async fn decide(&self, action: ActionInfo) -> ApprovalOutcome { (**self).decide(action).await }
+}
+```
+
+3. `Daemon`에 `gate: Arc<SessionGate>` 필드 추가, `run_session`의 `DenyGate`를 `self.gate.clone()`으로 교체하고 **DenyGate 구조체와 impl을 삭제**(dead_code 경고 방지, Task 11 '경고 없이' 기준 유지).
+4. `handle()`의 `ApprovalRespond`에서 게이트 해제: `pending_asks.remove`로 얻은 `(tool, target)`으로 `gate.pending.remove(&tool)`의 tx에 decision 그대로 전송 (deny도 전달 — 게이트는 받은 decision을 반환). `always && approved`는 grant_always 후 **Approve 전송 필수** — grant만 하고 채널을 해제하지 않으면 "항상 허용" 승인 턴이 대기에 걸린다. grant 시 `tool: Some(tool.clone())` 사용 (move 순서 주의).
+
+주의: 게이트 키가 툴명이라 세션 간 동일 툴 동시 ASK 시 이전 tx 드롭(자동 Deny — 안전 방향)·타 세션 응답이 게이트를 해제할 수 있다. M1은 '세션당 직렬 승인' 가정이며 다중 세션 동시 승인은 키에 세션 포함 재설계(후속). 게이트 대기 중 세션 종료 시 rx 드롭으로 Deny 복귀(안전 방향). 승인 왕복 테스트는 `tmp_root("approval")` 사용 (병렬 경합 방지).
 
 - [ ] **Step 3: 테스트 통과 확인**
 
