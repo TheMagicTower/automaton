@@ -2298,7 +2298,9 @@ impl Daemon {
         let mut history = self.store.messages(session).unwrap_or_default();
         let mut emit = move |e: Event| { let _ = tx.send(e); }; // Send 클로저 — run_turn의 + Send 바운드 충족(실측 반영)
         let prior = history.len(); // 신규 분절만 저장 — 기존 재기록 시 매 턴 중복 증식(실측 결함)
-        let _ = loop_.run_turn(session, &mut history, text.to_string(), &mut emit).await;
+        if let Err(e) = loop_.run_turn(session, &mut history, text.to_string(), &mut emit).await {
+            let _ = emit(Event::Error { session: Some(session.to_string()), message: format!("턴 실패: {e}") }); // 침묵 끊김 방지 (리뷰 자문)
+        }
         for m in &history[prior..] { let _ = self.store.append_message(session, &m.role, &m.content); }
     }
 }
@@ -2474,7 +2476,18 @@ async fn allow_path_runs_tool_streams_and_audits() {
     assert!(audit.contains("tool_result"));
     // 메모리 지속 검증 (§9): 세션 메시지가 저장됨 + 중복 재기록 회귀 방지(2회 전송 후 행 수)
     // (store는 데몬 내부 — 재시작 검증은 Chunk 5 셸 연동 시점에 확장)
-    let _ = std::fs::read_to_string(root.join("data/memory.db")).is_ok(); // DB 파일 존재
+    // 중복 재기록 회귀 가드: append는 턴 종료 후 비동기라 짧은 재시도로 행 수 단언 (리뷰 자문)
+    let db = root.join("data/memory.db");
+    let _ = std::fs::read_to_string(&db).is_ok();
+    let mut rows = 0;
+    for _ in 0..20 {
+        if let Ok(store) = automaton_memory::MemoryStore::open(&db) {
+            rows = store.messages("s1").map(|m| m.len()).unwrap_or(0);
+            if rows > 0 { break; }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(rows >= 2, "세션 메시지 미저장 또는 재기록 결함 (rows={rows})");
 }
 ```
 
