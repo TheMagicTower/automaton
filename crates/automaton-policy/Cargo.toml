@@ -6,3 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+automaton-proto = { path = "../automaton-proto" }
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
