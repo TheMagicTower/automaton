@@ -2523,3 +2523,353 @@ Expected: proto 4 + policy 10 + tools 15(+2 ignored) + core 8 + memory 7 + appre
 ```bash
 git add -A && git commit -m "test(daemon): headless e2e over uds with audit verification"
 ```
+
+## Chunk 5: SwiftUI 메뉴바 앱 — Brass & Glass 셸
+
+> M1 셸 범위: 모드 스위처·대화 스트림·승인 배너(힌트 포함). 답장 초안 칩은 Apprentice 3단계(§6), 글로벌 단축키·오버레이·테마 파일화·음성은 후속 계획. 승인 배너 왕복이 Chunk 4에서 미완이던 ASK 채널의 셸측 절반을 완성한다(데몬 게이트 oneshot 연결 — Task 14).
+
+### Task 13: Swift 패키지 + 데몬 연결 + 테마
+
+**Files:**
+- Create: `apps/Automaton/Package.swift`, `apps/Automaton/Sources/Automaton/App.swift`, `apps/Automaton/Sources/Automaton/DaemonConnection.swift`, `apps/Automaton/Sources/Automaton/Theme.swift`
+- Modify: `.gitignore` (`.build/` 추가)
+
+- [ ] **Step 1: Package.swift 작성**
+
+```swift
+// swift-tools-version:6.0
+import PackageDescription
+
+let package = Package(
+    name: "Automaton",
+    platforms: [.macOS(.v14)],
+    targets: [.executableTarget(name: "Automaton", path: "Sources/Automaton")]
+)
+```
+
+- [ ] **Step 2: Theme.swift — Brass & Glass (§8)**
+
+```swift
+import SwiftUI
+
+/// Brass & Glass 팔레트 — 다크 월넛 + 황동 + 세리프 제목. M1은 코드 상수, 테마 파일화는 후속.
+enum Theme {
+    static let walnut = Color(red: 0.10, green: 0.09, blue: 0.07)
+    static let walnutPanel = Color(red: 0.14, green: 0.12, blue: 0.08)
+    static let brass = Color(red: 0.69, green: 0.55, blue: 0.34)
+    static let gold = Color(red: 0.79, green: 0.64, blue: 0.15)
+    static let ivory = Color(red: 0.85, green: 0.80, blue: 0.70)
+    static let dim = Color(red: 0.54, green: 0.48, blue: 0.36)
+
+    static func title(_ s: String) -> some View {
+        Text(s).font(.system(.title3, design: .serif)).foregroundStyle(gold)
+    }
+}
+```
+
+- [ ] **Step 3: DaemonConnection.swift — UDS ndjson 클라이언트**
+
+```swift
+import Foundation
+import Network
+
+enum Mode: String, Codable, Sendable { case code, mac, chat }
+
+struct ActionInfo: Codable, Sendable { let tool: String; let target: String; let risk: String }
+struct Hint: Codable, Sendable { let text: String; let similarCount: UInt }
+
+enum ShellEvent: Codable, Sendable {
+    case streamDelta(session: String, delta: String)
+    case toolStarted(session: String, tool: String, summary: String)
+    case toolResult(session: String, tool: String, ok: Bool, summary: String)
+    case approvalRequested(session: String, approval: String, action: ActionInfo, hint: Hint?)
+    case modeChanged(session: String, mode: Mode)
+    case error(session: String?, message: String)
+
+    enum CodingKeys: String, CodingKey { case type, session, delta, tool, summary, ok, approval, action, hint, mode, message }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try c.decode(String.self, forKey: .type)
+        switch type {
+        case "stream_delta": self = .streamDelta(session: try c.decode(String.self, forKey: .session), delta: try c.decode(String.self, forKey: .delta))
+        case "tool_started": self = .toolStarted(session: try c.decode(String.self, forKey: .session), tool: try c.decode(String.self, forKey: .tool), summary: try c.decode(String.self, forKey: .summary))
+        case "tool_result": self = .toolResult(session: try c.decode(String.self, forKey: .session), tool: try c.decode(String.self, forKey: .tool), ok: try c.decode(Bool.self, forKey: .ok), summary: try c.decode(String.self, forKey: .summary))
+        case "approval_requested": self = .approvalRequested(session: try c.decode(String.self, forKey: .session), approval: try c.decode(String.self, forKey: .approval), action: try c.decode(ActionInfo.self, forKey: .action), hint: try c.decodeIfPresent(Hint.self, forKey: .hint))
+        case "mode_changed": self = .modeChanged(session: try c.decode(String.self, forKey: .session), mode: try c.decode(Mode.self, forKey: .mode))
+        case "error": self = .error(session: try c.decodeIfPresent(String.self, forKey: .session), message: try c.decode(String.self, forKey: .message))
+        default: throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "알 수 없는 이벤트: \(type)")
+        }
+    }
+    func encode(to encoder: Encoder) throws { throw EncodingError.invalidValue(self, .init(codingPath: [], debugDescription: "수신 전용")) }
+}
+
+/// 데몬 연결 — actor 직렬화, ndjson 한 줄씩 송수신.
+actor DaemonConnection {
+    private var connection: NWConnection?
+    private let socketPath: String
+    private var continuation: AsyncStream<ShellEvent>.Continuation?
+    private var buffer = Data()
+
+    init(socketPath: String = NSString(string: "~/.local/share/automaton/automatond.sock").expandingTildeInPath) {
+        self.socketPath = socketPath
+    }
+
+    func events() -> AsyncStream<ShellEvent> {
+        AsyncStream { cont in
+            self.continuation = cont
+            self.connect()
+        }
+    }
+
+    private func connect() {
+        let conn = NWConnection(to: .unixPath(socketPath), using: .tcp)
+        connection = conn
+        conn.stateUpdateHandler = { [weak self] state in
+            if case .failed = state { Task { await self?.handleDisconnect() } }
+        }
+        receiveLoop(conn)
+        conn.start(queue: .global(qos: .userInitiated))
+    }
+
+    private func handleDisconnect() {
+        continuation?.finish()
+        continuation = nil
+        connection = nil
+    }
+
+    private func receiveLoop(_ conn: NWConnection) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, done, error in
+            guard let self else { return }
+            if let data { Task { await self.consume(data) } }
+            if error == nil && !done { self.receiveLoop(conn) }
+        }
+    }
+
+    private func consume(_ data: Data) {
+        buffer.append(data)
+        while let nl = buffer.firstIndex(of: 0x0A) {
+            let line = Data(buffer[buffer.startIndex..<nl])
+            buffer = buffer[buffer.index(after: nl)...]
+            guard let ev = try? JSONDecoder().decode(ShellEvent.self, from: line) else { continue }
+            continuation?.yield(ev)
+        }
+    }
+
+    func send(_ json: String) {
+        guard let conn = connection, let data = (json + "\n").data(using: .utf8) else { return }
+        conn.send(content: data, completion: .contentProcessed { _ in })
+    }
+
+    func sendRequest(method: String, params: [String: Any]) {
+        if let data = try? JSONSerialization.data(withJSONObject: ["method": method, "params": params]),
+           let s = String(data: data, encoding: .utf8) { send(s) }
+    }
+}
+```
+
+- [ ] **Step 4: App.swift — 메뉴바 팝오버**
+
+```swift
+import SwiftUI
+
+@main
+struct AutomatonApp: App {
+    @State private var model = ShellModel()
+    var body: some Scene {
+        MenuBarExtra("automaton", systemImage: "gearshape.fill") {
+            ShellView().environment(model).frame(width: 380, height: 480)
+        }
+        .menuBarExtraStyle(.window)
+    }
+}
+
+@Observable
+@MainActor
+final class ShellModel {
+    var mode: Mode = .chat
+    var stream: [String] = []
+    var pendingApproval: (id: String, action: ActionInfo, hint: Hint?)?
+    var connected = false
+    private let conn = DaemonConnection()
+    private let session = "shell-\(UInt64(Date().timeIntervalSince1970))"
+
+    func start() {
+        Task {
+            conn.sendRequest(method: "session_create", params: ["id": session])
+            for await ev in conn.events() {
+                connected = true
+                apply(ev)
+            }
+            connected = false
+        }
+    }
+
+    private func apply(_ ev: ShellEvent) {
+        switch ev {
+        case .streamDelta(_, let delta): stream.append(delta)
+        case .toolStarted(_, let tool, _): stream.append("\n⚙ \(tool)")
+        case .toolResult(_, let tool, let ok, let summary): stream.append(ok ? " ✓ \(tool)" : " ✗ \(tool): \(summary)")
+        case .approvalRequested(_, let id, let action, let hint): pendingApproval = (id, action, hint)
+        case .modeChanged(_, let mode): self.mode = mode
+        case .error(_, let message): stream.append("\n⚠ \(message)")
+        }
+    }
+
+    func send(_ text: String) {
+        stream.append("\n▸ \(text)")
+        conn.sendRequest(method: "message_send", params: ["session": session, "text": text])
+    }
+
+    /// §5 모드 전환 승인 — 확인 대화상자 후에만 전송 (프로토콜 계약)
+    func requestMode(_ to: Mode) {
+        conn.sendRequest(method: "mode_switch", params: ["session": session, "to": to.rawValue])
+    }
+
+    func respond(approve: Bool, always: Bool) {
+        guard let p = pendingApproval else { return }
+        conn.sendRequest(method: "approval_respond", params: ["session": session, "approval": p.id, "decision": approve ? "approve" : "deny", "always": always])
+        pendingApproval = nil
+    }
+}
+
+struct ShellView: View {
+    @Environment(ShellModel.self) private var model
+    @State private var draft = ""
+    @State private var confirmMode: Mode?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            modeBar
+            Divider().overlay(Theme.brass.opacity(0.4))
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(model.stream.joined()).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.ivory).frame(maxWidth: .infinity, alignment: .leading).id("bottom")
+                }.onChange(of: model.stream.count) { proxy.scrollTo("bottom") }
+            }
+            if let p = model.pendingApproval {
+                ApprovalBanner(action: p.action, hint: p.hint) { ok, always in model.respond(approve: ok, always: always) }
+            }
+            inputBar
+        }
+        .background(Theme.walnut)
+        .onAppear { model.start() }
+        .confirmationDialog("모드를 전환할까요?", isPresented: Binding(get: { confirmMode != nil }, set: { if !$0 { confirmMode = nil } }), titleVisibility: .visible) {
+            Button("전환") { if let m = confirmMode { model.requestMode(m) }; confirmMode = nil }
+            Button("취소", role: .cancel) { confirmMode = nil }
+        }
+    }
+
+    private var modeBar: some View {
+        HStack(spacing: 8) {
+            Theme.title("automaton")
+            Spacer()
+            ForEach(Mode.allCases, id: \.self) { m in
+                Button { confirmMode = m } label: {
+                    Text(m == .code ? "⚙ code" : m == .mac ? "🔭 mac" : "📖 chat")
+                        .font(.system(size: 12, design: .serif)).padding(.horizontal, 10).padding(.vertical, 3)
+                        .background(Capsule().fill(model.mode == m ? AnyShapeStyle(LinearGradient(colors: [Theme.gold.opacity(0.9), Theme.brass], startPoint: .top, endPoint: .bottom)) : AnyShapeStyle(Color.clear)))
+                        .overlay(Capsule().strokeBorder(model.mode == m ? Theme.gold : Theme.dim.opacity(0.6)))
+                        .foregroundStyle(model.mode == m ? Theme.walnut : Theme.dim)
+                }.buttonStyle(.plain)
+            }
+        }.padding(10)
+    }
+
+    private var inputBar: some View {
+        HStack {
+            TextField("명령…", text: $draft).textFieldStyle(.plain).foregroundStyle(Theme.ivory)
+                .onSubmit { if !draft.isEmpty { model.send(draft); draft = "" } }
+            Button { if !draft.isEmpty { model.send(draft); draft = "" } } label: { Image(systemName: "paperplane.fill").foregroundStyle(Theme.gold) }.buttonStyle(.plain)
+        }.padding(10)
+    }
+}
+
+struct ApprovalBanner: View {
+    let action: ActionInfo
+    let hint: Hint?
+    let respond: (Bool, Bool) -> Void
+    @State private var always = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Theme.title("⚖ \(action.tool)")
+            Text(action.target.isEmpty ? action.risk : "\(action.target) — \(action.risk)").font(.caption).foregroundStyle(Theme.ivory)
+            if let h = hint { Text("◈ \(h.text) (유사 \(h.similarCount)건)").font(.caption2).foregroundStyle(Theme.dim) }
+            HStack {
+                Toggle("항상 허용", isOn: $always).toggleStyle(.switch).controlSize(.mini).font(.caption2).foregroundStyle(Theme.dim)
+                Spacer()
+                Button("거절") { respond(false, false) }.buttonStyle(.bordered).tint(Theme.dim)
+                Button("승인") { respond(true, always) }.buttonStyle(.borderedProminent).tint(Theme.brass)
+            }
+        }.padding(10).background(RoundedRectangle(cornerRadius: 8).fill(Theme.brass.opacity(0.10)).overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.brass)))
+    }
+}
+```
+
+- [ ] **Step 5: 빌드 검증**
+
+Run: `cd apps/Automaton && swift build`
+Expected: BUILD SUCCEEDED (Swift 6 strict concurrency — 오류 시 actor 격리·Sendable부터 점검).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add -A && git commit -m "feat(shell): swiftui menu bar app - brass glass theme, approval banner, mode switcher"
+```
+
+### Task 14: 데몬 승인 채널 완성 + 수동 스모크 (§10)
+
+**Files:**
+- Modify: `reference/automatond/src/daemon.rs` (ASK 게이트 oneshot 연결)
+- Test: `reference/automatond/tests/e2e.rs` (승인 왕복 시나리오)
+
+- [ ] **Step 1: E2E 승인 왕복 테스트 작성**
+
+`reference/automatond/tests/e2e.rs`에 추가 — 구조는 `allow_path_runs_tool_streams_and_audits`와 동일하되: ① 스크립트가 `fs.delete` 툴콜(대상 파일 사전 생성) → 응답 텍스트 순서, ② `mode_switch`→code 후 message_send, ③ 이벤트 루프에서 `ApprovalRequested`의 approval id를 추출하는 즉시 `approval_respond` approve 전송, ④ 이어서 `ToolResult{ok:true}`와 파일 삭제(`!target.exists()`)를 단언. (전체 코드는 allow_path 테스트의 복제 변형 — 동일 헬퍼 재사용.)
+
+Run: `cargo test -p automatond`
+Expected: FAIL — 현 DenyGate가 ASK를 즉시 거부하므로 ToolResult ok:false.
+
+- [ ] **Step 2: 데몬 게이트 연결**
+
+`daemon.rs` 수정:
+1. `SessionGate` 도입 — `pending: Mutex<HashMap<String, oneshot::Sender<automaton_proto::Decision>>>` (키: 툴명, 세션당 직렬 승인 가정). `#[async_trait] impl ApprovalGate for Arc<SessionGate>`: `decide()`에서 채널 생성·등록 후 `rx.await` — Approve→Approve, 그 외→Deny.
+2. `Daemon`에 `gate: Arc<SessionGate>` 필드 추가, `run_session`의 `DenyGate`를 `self.gate.clone()`으로 교체.
+3. `handle()`의 `ApprovalRespond` `Some(_)` 분기: `pending_asks`에서 툴 역산 → `gate.pending.remove(&tool)`의 tx에 decision 전송.
+
+주의: 동일 툴 동시 ASK는 M1에서 직렬 처리된다(프로토콜 단순성 — 세션당 1 진행). 게이트 대기 중 세션 종료 시 rx 드롭으로 Deny 복귀(안전 방향).
+
+- [ ] **Step 3: 테스트 통과 확인**
+
+Run: `cargo test -p automatond`
+Expected: 2 passed (기존 1 + 승인 왕복 1).
+
+- [ ] **Step 4: 수동 스모크 체크리스트 (§10 — UI는 수동 검증)**
+
+사전 조건: `AUTOMATON_API_KEY` 설정(기존 키 재사용, §3), `cargo run -p automatond -- serve`, `cd apps/Automaton && swift run`.
+
+- 메뉴바 톱니 → 팝오버 오픈, 월넛+황동 확인 (Brass & Glass §8)
+- 모드 전환 확인 대화상자 → ModeChanged 반영
+- chat 모드 질의 → 스트림 표시
+- code 모드 파일 쓰기 지시 → ToolStarted/ToolResult 표시
+- fs.delete 지시 → 승인 배너 → 거절 시 파일 유지 → 승인 시 삭제
+- "항상 허용" 1회 → 재지시 시 배너 없이 즉시 실행 (~/.config/automaton/policy.toml 확인)
+- `automatond doctor` 출력 확인 (§9)
+
+실패 시: 감사 로그 `~/.local/share/automaton/audit/<session>.jsonl`에서 이벤트 순서 대조.
+
+- [ ] **Step 5: 전체 회귀 + Commit**
+
+Run: `cargo test --workspace && (cd apps/Automaton && swift build)`
+Expected: 50 passed + 2 ignored, BUILD SUCCEEDED.
+
+```bash
+git add -A && git commit -m "feat(daemon): approval gate channel + shell smoke verified"
+```
+
+---
+
+## 실행 인계
+
+계획 전체가 승인되면 superpowers:subagent-driven-development(서브에이전트 사용 가능 환경) 또는 superpowers:executing-plans로 실행한다. 태스크 순서는 청크 순서를 지킨다(의존성: 1→2→3→4→5).
