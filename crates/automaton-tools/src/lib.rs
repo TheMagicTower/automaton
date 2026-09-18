@@ -2,6 +2,8 @@
 
 pub mod fs_tools;
 pub use fs_tools::*;
+pub mod shell;
+pub use shell::*;
 
 use automaton_policy::Category;
 
@@ -36,7 +38,7 @@ impl Registry {
         r.register(Box::new(FsWrite));
         r.register(Box::new(FsGrep));
         r.register(Box::new(FsDelete));
-        // shell.exec 등록은 Task 5 Step 3에서 이 위치에 추가 (ShellExec는 Task 5에서 정의 — 조기 참조 시 E0425)
+        r.register(Box::new(ShellExec));
         r.register(Box::new(EditApply));
         r
     }
