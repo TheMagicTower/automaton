@@ -91,7 +91,7 @@ cargo new reference/automatond --name automatond
 
 ```toml
 [package]
-name.workspace = true
+name = "automaton-proto"  # 크레이트별 명시 이름 (name은 workspace 상속 불가) — 각 크레이트 이름으로 기입
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -158,7 +158,7 @@ fn unknown_event_type_is_error_not_panic() {
 `crates/automaton-proto/Cargo.toml` 의존성:
 
 ```toml
-[dependencies]
+[dependencies]  # cargo new가 생성한 빈 [dependencies] 테이블을 아래 내용으로 교체
 serde.workspace = true
 serde_json.workspace = true
 ```
@@ -348,7 +348,7 @@ fn policy_file_roundtrip_persists_granted_rules() {
 `crates/automaton-policy/Cargo.toml`:
 
 ```toml
-[dependencies]
+[dependencies]  # 마찬가지로 기존 빈 테이블 교체
 automaton-proto = { path = "../automaton-proto" }
 serde.workspace = true
 toml.workspace = true
@@ -365,7 +365,7 @@ Expected: FAIL — 타입 미정의.
 ```rust
 //! automaton-policy — 결정론적 권한 엔진 (§5). 학습 출력은 이 모듈을 우회할 수 없다.
 
-use automaton_proto::Mode;
+pub use automaton_proto::Mode; // 재수출 — 하부 크레이트·테스트가 automaton_policy::Mode로 접근
 use serde::{Deserialize, Serialize};
 
 /// 툴 호출의 위험 분류 — 툴 구현이 자기 분류를 선언하고 엔진이 규칙으로 판정한다.
@@ -410,7 +410,12 @@ pub enum PolicyError {
 }
 
 #[derive(Serialize, Deserialize)]
-struct PolicyFile { granted: Vec<Rule>, rules: Vec<Rule> }
+struct PolicyFile {
+    #[serde(default)]
+    granted: Vec<Rule>,
+    #[serde(default)]
+    rules: Vec<Rule>,
+}
 
 /// granted = 소유자 명시 서명("항상 허용") — builtin/파일 규칙보다 우선하되
 /// 비밀번호 필드 정적 거부는 절대 우회 불가. rules = builtin + 정책 파일 규칙.
@@ -445,9 +450,9 @@ impl Engine {
 
     /// 결정론적 평가 순서:
     /// 1) 비밀번호 필드 → 정적 DENY (그 무엇도 우회 불가)
-    /// 2) 소유자 명시 granted → Allow (§5 민감 영역 명시 등록 = 화이트리스트)
-    /// 3) 명시 DENY 규칙 (규칙 목록 내 Allow보다 항상 우선)
-    /// 4) 모드 전환 → 항상 ASK
+    /// 2) 모드 전환 → 항상 ASK (granted로도 우회 불가 — §5 원천 차단)
+    /// 3) 소유자 명시 granted → Allow (§5 민감 영역 명시 등록 = 화이트리스트)
+    /// 4) 명시 DENY 규칙 (규칙 목록 내 Allow보다 항상 우선)
     /// 5) 나머지 규칙 첫 매치
     /// 6) 카테고리×모드 기본값
     pub fn evaluate(&self, a: &Action, mode: Mode) -> Verdict {
@@ -457,17 +462,17 @@ impl Engine {
                 return Verdict::Deny { reason: format!("민감 입력 필드: {t}") };
             }
         }
-        // 2. 소유자 명시 허용 최우선 (파일 저장·재시작 후에도 유지)
-        if let Some(r) = self.granted.iter().find(|r| r.verdict == VerdictTemplate::Allow && matches(r, a)) {
-            return Verdict::Allow;
-        }
-        // 3. 명시 DENY 규칙
-        if let Some(r) = self.rules.iter().find(|r| r.verdict == VerdictTemplate::Deny && matches(r, a)) {
-            return Verdict::Deny { reason: format!("규칙 {}: 거부", r.name) };
-        }
-        // 4. 모드 전환은 언제나 승인 (§5)
+        // 2. 모드 전환은 언제나 승인 — 소유자 granted로도 우회 불가 (§5 원천 차단)
         if a.category == Category::ModeSwitch {
             return Verdict::Ask { reason: "모드 전환".into() };
+        }
+        // 3. 소유자 명시 허용 (파일 저장·재시작 후에도 유지)
+        if self.granted.iter().any(|r| r.verdict == VerdictTemplate::Allow && matches(r, a)) {
+            return Verdict::Allow;
+        }
+        // 4. 명시 DENY 규칙
+        if let Some(r) = self.rules.iter().find(|r| r.verdict == VerdictTemplate::Deny && matches(r, a)) {
+            return Verdict::Deny { reason: format!("규칙 {}: 거부", r.name) };
         }
         // 5. 나머지 규칙 — 첫 매치
         if let Some(r) = self.rules.iter().find(|r| r.verdict != VerdictTemplate::Deny && matches(r, a)) {
@@ -521,7 +526,7 @@ fn from_template(t: &VerdictTemplate, a: &Action) -> Verdict {
 fn short(a: &Action) -> &str { &a.tool }
 ```
 
-주의: ① 매처가 전부 None인 규칙은 캐치올이므로 builtin에 두지 않는다. ② DENY 경로는 비밀번호 필드(정적, 불가침)와 명시 deny 규칙뿐이며, 금지 앱은 deny 규칙으로 구현돼 소유자 grant_always로만 해제된다(§5 화이트리스트). ③ granted 우선순위가 rules의 Allow/Deny보다 앞서므로 "항상 허용"이 즉시 효과를 갖는다 — 비밀번호 필드만은 예외. ④ 감사 로그(모든 정책 결정 기록)와 mac 모드 셸 허용 명령 allowlist는 Chunk 4(데몬)·Chunk 2(셸 툴)에서 구현한다.
+주의: ① 매처가 전부 None인 규칙은 캐치올이므로 builtin에 두지 않는다. ② DENY 경로는 비밀번호 필드(정적, 불가침)와 명시 deny 규칙뿐이며, 금지 앱은 deny 규칙으로 구현돼 소유자 grant_always로만 해제된다(§5 화이트리스트). ③ 모드 전환은 granted 평가 이전에 무조건 ASK — "항상 허용"으로도 우회 불가(§5 원천 차단). ④ 감사 로그(모든 정책 결정 기록)와 mac 모드 셸 허용 명령 allowlist는 Chunk 4(데몬)·Chunk 2(셸 툴)에서 구현한다.
 
 - [ ] **Step 4: 테스트 통과 확인**
 
