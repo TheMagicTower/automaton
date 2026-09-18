@@ -2850,7 +2850,7 @@ Expected: FAIL — 현 DenyGate가 ASK를 즉시 거부하므로 ToolResult ok:f
 
 `daemon.rs` 수정:
 1. `SessionGate` 도입 — `pending: Mutex<HashMap<String, oneshot::Sender<automaton_proto::Decision>>>` (키: 툴명, 세션당 직렬 승인 가정). 구현은 **로컬 타입에 직접**: `#[async_trait] impl ApprovalGate for SessionGate` (SessionGate는 데몬 로컬 타입이라 고아 규칙 허용 — `impl ApprovalGate for Arc<SessionGate>`는 E0117 오류, 실측). `decide()`에서 채널 생성·등록 후 `rx.await` — Approve→Approve, 그 외→Deny.
-2. automaton-core(Chunk 2 provider.rs의 Box blanket 옆)에 `Arc<G>` blanket 추가 — trait이 core 로컬이라 허용됨:
+2. automaton-core(Chunk 2 loop_.rs의 Box<G> blanket 옆)에 `Arc<G>` blanket 추가 — trait이 core 로컬이라 허용됨:
 
 ```rust
 #[async_trait::async_trait]
