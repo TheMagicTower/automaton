@@ -87,7 +87,7 @@ for c in proto policy tools memory apprentice core; do
 done
 cargo new reference/automatond --name automatond
 ```
-각 `crates/*/Cargo.toml`의 `cargo new`가 생성한 `[package]` 테이블을 아래 공통 상속 헤더로 **교체** (그대로 추가하면 TOML 중복 테이블 오류로 `cargo check` 실패):
+각 `crates/*/Cargo.toml`과 `reference/automatond/Cargo.toml`의 `cargo new`가 생성한 `[package]` 테이블을 아래 공통 상속 헤더로 **교체** (그대로 추가하면 TOML 중복 테이블 오류로 `cargo check` 실패):
 
 ```toml
 [package]
@@ -304,9 +304,13 @@ fn deny_takes_precedence_over_allow_regardless_of_order() {
 }
 
 #[test]
-fn mode_switch_always_asks() {
+fn mode_switch_always_asks_even_when_granted() {
     let e = Engine::builtin();
     assert!(matches!(e.evaluate(&action("mode.switch", Category::ModeSwitch), Mode::Chat), Verdict::Ask { .. }));
+    // §5 원천 차단 불변식: 소유자 granted Allow 규칙으로도 모드 전환은 우회 불가
+    let mut g = Engine::builtin();
+    g.grant_always(Rule { name: "always-switch".into(), tool: Some("mode.switch".into()), app: None, category: None, verdict: VerdictTemplate::Allow });
+    assert!(matches!(g.evaluate(&action("mode.switch", Category::ModeSwitch), Mode::Chat), Verdict::Ask { .. }));
 }
 
 #[test]
