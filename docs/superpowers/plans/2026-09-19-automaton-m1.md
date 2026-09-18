@@ -1268,6 +1268,12 @@ impl<G: ApprovalGate + ?Sized> ApprovalGate for Box<G> {
     async fn decide(&self, action: ActionInfo) -> ApprovalOutcome { (**self).decide(action).await }
 }
 
+// 참조(&dyn) 전달 구현 — 데몬이 Box<dyn Provider>를 참조로 넘길 때 필요 (Chunk 4 리뷰 반영)
+#[async_trait::async_trait]
+impl<P: Provider + ?Sized> Provider for &P {
+    async fn complete(&self, req: CompletionRequest) -> Result<Vec<StreamItem>, CoreError> { (**self).complete(req).await }
+}
+
 pub struct AgentLoop<P: Provider, G: ApprovalGate> {
     provider: P,
     gate: G,
@@ -1283,7 +1289,7 @@ impl<P: Provider, G: ApprovalGate> AgentLoop<P, G> {
         AgentLoop { provider, gate, policy, registry, profile, approval_seq: AtomicU32::new(1) }
     }
 
-    pub async fn run_turn(&self, history: &mut Vec<Message>, user: String, emit: &mut dyn FnMut(Event)) -> Result<(), CoreError> {
+    pub async fn run_turn(&self, history: &mut Vec<Message>, user: String, emit: &mut (dyn FnMut(Event) + Send)) -> Result<(), CoreError> {
         const MAX_TURNS: usize = 32; // 비정상 프로바이더 무한 반복 방지 (§9)
         let session = "s".to_string(); // 세션 ID는 Chunk 4 데몬이 주입
         history.push(Message { role: "user".into(), content: user });
@@ -1319,7 +1325,7 @@ impl<P: Provider, G: ApprovalGate> AgentLoop<P, G> {
         CompletionRequest { system: self.profile.system_prompt.clone(), messages: history.to_vec(), tools }
     }
 
-    async fn run_tool_call(&self, session: &str, call: &ToolCall, history: &mut Vec<Message>, emit: &mut dyn FnMut(Event)) -> Result<(), CoreError> {
+    async fn run_tool_call(&self, session: &str, call: &ToolCall, history: &mut Vec<Message>, emit: &mut (dyn FnMut(Event) + Send)) -> Result<(), CoreError> {
         let Some(tool) = self.registry.get(&call.name) else {
             let msg = format!("알 수 없는 툴: {}", call.name);
             emit(Event::ToolResult { session: session.into(), tool: call.name.clone(), ok: false, summary: msg.clone() });
@@ -1354,7 +1360,7 @@ impl<P: Provider, G: ApprovalGate> AgentLoop<P, G> {
         Ok(())
     }
 
-    fn execute_and_record(&self, session: &str, tool: &dyn Tool, call: &ToolCall, history: &mut Vec<Message>, emit: &mut dyn FnMut(Event)) {
+    fn execute_and_record(&self, session: &str, tool: &dyn Tool, call: &ToolCall, history: &mut Vec<Message>, emit: &mut (dyn FnMut(Event) + Send)) {
         emit(Event::ToolStarted { session: session.into(), tool: call.name.clone(), summary: tool.description().to_string() });
         let result = tool.execute(&call.args).map_err(|e| e.to_string());
         let (ok, text) = match result { Ok(s) => (true, s), Err(e) => (false, e) };
@@ -1491,7 +1497,7 @@ pub struct Decision {
     pub decision: String,
 }
 
-pub struct MemoryStore { conn: Connection }
+pub struct MemoryStore { conn: std::sync::Mutex<Connection> } // Mutex — rusqlite Connection이 !Sync라 Arc<Daemon> 스폰을 위해 Sync화 (Chunk 4 리뷰 반영)
 
 impl MemoryStore {
     pub fn open(path: &std::path::Path) -> Result<Self> {
@@ -1508,47 +1514,51 @@ impl MemoryStore {
     }
 
     pub fn append_message(&self, session: &str, role: &str, content: &str) -> Result<()> {
-        self.conn.execute("INSERT INTO messages(session, role, content) VALUES (?1, ?2, ?3)", (session, role, content))?;
+        self.conn.lock().unwrap().execute("INSERT INTO messages(session, role, content) VALUES (?1, ?2, ?3)", (session, role, content))?;
         Ok(())
     }
 
     pub fn messages(&self, session: &str) -> Result<Vec<Message>> {
-        let mut stmt = self.conn.prepare("SELECT role, content FROM messages WHERE session = ?1 ORDER BY id")?;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT role, content FROM messages WHERE session = ?1 ORDER BY id")?;
         let rows = stmt.query_map([session], |r: &Row| Ok(Message { role: r.get(0)?, content: r.get(1)? }))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn save_summary(&self, session: &str, summary: &str) -> Result<()> {
-        self.conn.execute("INSERT INTO summaries(session, summary) VALUES (?1, ?2) ON CONFLICT(session) DO UPDATE SET summary = ?2, at = datetime('now')", (session, summary))?;
+        self.conn.lock().unwrap().execute("INSERT INTO summaries(session, summary) VALUES (?1, ?2) ON CONFLICT(session) DO UPDATE SET summary = ?2, at = datetime('now')", (session, summary))?;
         Ok(())
     }
 
     pub fn search_summaries(&self, query: &str) -> Result<Vec<String>> {
         // M1 위임: 스펙 §7 작업 계층은 'FTS5 + 벡터' 명시 — M1은 LIKE 근사, FTS/벡터는 후속 계획(§7 위임 사항)
-        let mut stmt = self.conn.prepare("SELECT summary FROM summaries WHERE summary LIKE ?1")?;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT summary FROM summaries WHERE summary LIKE ?1")?;
         let pat = format!("%{query}%");
         let rows = stmt.query_map([&pat], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn add_fact(&self, content: &str) -> Result<()> {
-        self.conn.execute("INSERT INTO facts_fts(content) VALUES (?1)", (content,))?;
+        self.conn.lock().unwrap().execute("INSERT INTO facts_fts(content) VALUES (?1)", (content,))?;
         Ok(())
     }
 
     pub fn search_facts(&self, query: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT content FROM facts_fts WHERE facts_fts MATCH ?1")?;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT content FROM facts_fts WHERE facts_fts MATCH ?1")?;
         let rows = stmt.query_map([fts_escape(query)], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn record_decision(&self, session: &str, tool: &str, target: &str, verdict: &str, decision: &str) -> Result<()> {
-        self.conn.execute("INSERT INTO decisions_fts(session, tool, target, verdict, decision) VALUES (?1, ?2, ?3, ?4, ?5)", (session, tool, target, verdict, decision))?;
+        self.conn.lock().unwrap().execute("INSERT INTO decisions_fts(session, tool, target, verdict, decision) VALUES (?1, ?2, ?3, ?4, ?5)", (session, tool, target, verdict, decision))?;
         Ok(())
     }
 
     pub fn search_decisions(&self, query: &str) -> Result<Vec<Decision>> {
-        let mut stmt = self.conn.prepare("SELECT session, tool, target, verdict, decision FROM decisions_fts WHERE decisions_fts MATCH ?1")?;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT session, tool, target, verdict, decision FROM decisions_fts WHERE decisions_fts MATCH ?1")?;
         let rows = stmt.query_map([fts_escape(query)], |r: &Row| Ok(Decision {
             session: r.get(0)?, tool: r.get(1)?, target: r.get(2)?, verdict: r.get(3)?, decision: r.get(4)?,
         }))?;
@@ -1558,7 +1568,8 @@ impl MemoryStore {
     /// 사전 구성된 FTS 쿼리 그대로 MATCH — 호출자(Apprentice)가 인용 접두·OR 형태를 직접 구성할 때 사용.
     /// 일반 텍스트 검색에는 search_decisions(fts_escape 자동 적용)를 쓸 것.
     pub fn search_decisions_fts(&self, raw_fts_query: &str) -> Result<Vec<Decision>> {
-        let mut stmt = self.conn.prepare("SELECT session, tool, target, verdict, decision FROM decisions_fts WHERE decisions_fts MATCH ?1")?;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT session, tool, target, verdict, decision FROM decisions_fts WHERE decisions_fts MATCH ?1")?;
         let rows = stmt.query_map([raw_fts_query], |r: &Row| Ok(Decision {
             session: r.get(0)?, tool: r.get(1)?, target: r.get(2)?, verdict: r.get(3)?, decision: r.get(4)?,
         }))?;
@@ -1654,6 +1665,7 @@ pub struct SkillMeta {
     pub path: std::path::PathBuf,
 }
 
+#[derive(Debug)]
 pub struct SkillIndex { pub skills: Vec<SkillMeta> }
 
 impl SkillIndex {
@@ -1957,7 +1969,8 @@ Expected: FAIL — mac 툴 미정의.
 
 use crate::{Tool, ToolError};
 use automaton_policy::Category;
-use core_graphics::event::{CGEvent, CGEventTapLocation, CGMouseButton, CGPoint};
+use core_graphics::event::{CGEvent, CGEventSource, CGEventSourceStateID, CGEventTapLocation, CGMouseButton};
+use core_graphics::geometry::CGPoint;
 use serde_json::Value;
 
 pub struct CaptureScreen;
@@ -2023,10 +2036,12 @@ impl Tool for InputClick {
         let x = args.get("x").and_then(|v| v.as_f64()).ok_or_else(|| ToolError::Message("x 인자 누락".into()))?;
         let y = args.get("y").and_then(|v| v.as_f64()).ok_or_else(|| ToolError::Message("y 인자 누락".into()))?;
         let pt = CGPoint { x, y };
+        let src = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+            .map_err(|_| ToolError::Message("CGEventSource 생성 실패".into()))?;
         for down in [true, false] {
-            let kind = if down { core_graphics::event::CGEventType::LeftMouseDown } else { core_graphics::event::CGEventType::LeftMouseButtonUp };
-            let ev = CGEvent::new_mouse_event(None, kind, pt, CGMouseButton::Left)
-                .map_err(|e| ToolError::Message(format!("이벤트 생성 실패: {e}")))?;
+            let kind = if down { core_graphics::event::CGEventType::LeftMouseDown } else { core_graphics::event::CGEventType::LeftMouseUp };
+            let ev = CGEvent::new_mouse_event(src.clone(), kind, pt, CGMouseButton::Left)
+                .map_err(|_| ToolError::Message("이벤트 생성 실패".into()))?;
             ev.post(CGEventTapLocation::HID);
         }
         Ok(format!("({x},{y}) 클릭 완료"))
@@ -2049,11 +2064,13 @@ impl Tool for InputType {
         use std::io::Write;
         child.stdin.take().unwrap().write_all(text.as_bytes()).map_err(|e| ToolError::Message(format!("pbcopy 쓰기 실패: {e}")))?;
         child.wait().map_err(|e| ToolError::Message(format!("pbcopy 대기 실패: {e}")))?;
-        // 2) Cmd+V 가상키 (V=9)
-        const V_KEY: u64 = 9;
+        // 2) Cmd+V 가상키 (V=9, CGKeyCode=u16) — CGEvent 생성 실패는 () 오류라 map_err(|_| ...)로 통일
+        const V_KEY: core_graphics::event::CGKeyCode = 9;
+        let src = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+            .map_err(|_| ToolError::Message("CGEventSource 생성 실패".into()))?;
         for down in [true, false] {
-            let ev = CGEvent::new_keyboard_event(None, V_KEY, down)
-                .map_err(|e| ToolError::Message(format!("키 이벤트 생성 실패: {e}")))?;
+            let ev = CGEvent::new_keyboard_event(src.clone(), V_KEY, down)
+                .map_err(|_| ToolError::Message("키 이벤트 생성 실패".into()))?;
             ev.set_flags(core_graphics::event::CGEventFlags::CGEventFlagCommand);
             ev.post(CGEventTapLocation::HID);
         }
@@ -2101,18 +2118,20 @@ git add -A && git commit -m "feat(tools): mac toolset - capture, ax summary, cgi
 `reference/automatond/src/daemon.rs`:
 
 ```rust
-//! 참조 데몬 (§2·§4) — UDS에서 ndjson RPC 서빙. 승인 게이트·감사 로그·정책 지속화·Apprentice 힌트 주입.
+//! 참조 데몬 (§2·§4) — UDS에서 ndjson RPC 서빙. 연결당 1개 writer 태스크(mpsc)가
+//! 감사 로그(§5) + Apprentice 결정 기록·힌트 주입(§6) + 소켓 출력을 단일 책임으로 수행한다.
 
 use automaton_apprentice::Apprentice;
 use automaton_core::{AgentLoop, ApprovalGate, ApprovalOutcome, Provider};
 use automaton_memory::MemoryStore;
-use automaton_policy::{Action, Category, Engine};
-use automaton_proto::{ActionInfo, Decision, Event, Mode, Request};
+use automaton_policy::{Engine, Rule, VerdictTemplate};
+use automaton_proto::{ActionInfo, Event, Mode, Request};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::oneshot;
+use tokio::sync::mpsc;
 
 pub struct Paths {
     pub data_dir: PathBuf,    // ~/.local/share/automaton
@@ -2132,19 +2151,6 @@ impl Paths {
     pub fn audit(&self, session: &str) -> PathBuf { self.data_dir.join("audit").join(format!("{session}.jsonl")) }
 }
 
-/// 승인 대기표 — ApprovalRequested 발행 후 ApprovalRespond까지 대기 (§5 ASK)
-struct Gate {
-    pending: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
-}
-#[async_trait::async_trait]
-impl ApprovalGate for Gate {
-    async fn decide(&self, action: ActionInfo) -> ApprovalOutcome {
-        // 데몬은 이 경로를 쓰지 않는다 — decide는 아래 serve_approval에서 채널로 대체된다.
-        let _ = action;
-        ApprovalOutcome::Deny
-    }
-}
-
 pub struct Daemon {
     pub provider: Box<dyn Provider>,
     pub paths: Paths,
@@ -2152,18 +2158,21 @@ pub struct Daemon {
     apprentice: Apprentice,
     store: MemoryStore,
     sessions: Mutex<HashMap<String, Mode>>,
+    /// 승인 id → 해당 승인 요청의 툴 — "항상 허용"을 툴 스코프로 제한·팬텀 id 차단 (§5)
+    pending_asks: Mutex<HashMap<String, String>>,
 }
 
 impl Daemon {
     pub fn new(provider: Box<dyn Provider>, paths: Paths) -> Self {
         std::fs::create_dir_all(&paths.data_dir).ok();
+        std::fs::create_dir_all(paths.data_dir.join("audit")).ok(); // 감사 디렉터리 — 첫 MessageSend 패닉 방지(실측 결함)
         std::fs::create_dir_all(&paths.config_dir).ok();
-        // 정책 합성 시점(스펙 리뷰 자문 반영): 파일이 있으면 파일 전체(granted+rules), 없으면 builtin.
-        // grant_always 시 save()가 granted+rules 전체를 내려쓰므로 파일이 항상 완전한 상태가 된다.
+        // 정책 합성 시점: 파일이 있으면 파일 전체(granted+rules), 없으면 builtin.
+        // grant_always 시 save()가 전체를 내려쓰므로 파일은 항상 완전 상태가 된다.
         let engine = Engine::from_file(&paths.policy()).unwrap_or_else(|_| Engine::builtin());
         let store = MemoryStore::open(&paths.memory()).expect("메모리 DB 열기 실패");
         let apprentice = Apprentice::open(&paths.memory()).expect("Apprentice DB 열기 실패");
-        Daemon { provider, paths, engine: Mutex::new(engine), apprentice, store, sessions: Mutex::new(HashMap::new()) }
+        Daemon { provider, paths, engine: Mutex::new(engine), apprentice, store, sessions: Mutex::new(HashMap::new()), pending_asks: Mutex::new(HashMap::new()) }
     }
 
     pub async fn serve(self: Arc<Self>, socket: PathBuf) -> std::io::Result<()> {
@@ -2178,89 +2187,125 @@ impl Daemon {
     }
 
     async fn handle(self: Arc<Self>, stream: UnixStream) {
-        let (rd, mut wr) = stream.into_split();
-        let mut lines = tokio::io::BufReader::new(rd).lines();
-        use tokio::io::AsyncWriteExt;
-        let mut emit = |_: &Event| {}; // 세션 스트림당 실제 emit은 run_session에서 구성
-        let _ = &mut emit;
+        let (rd, wr) = stream.into_split();
+        // 연결당 단일 writer 태스크 — OwnedWriteHalf는 Clone이 없어 세션별 복제 불가(실측 E0599).
+        // 모든 출력(요청 즉시 응답 + 스트림 이벤트)은 이 채널로 집결한다.
+        let (tx, rx) = mpsc::unbounded_channel::<Event>();
+        {
+            let d = self.clone();
+            tokio::spawn(async move { d.writer_loop(rx, wr).await });
+        }
+        let mut lines = BufReader::new(rd).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let Ok(req) = serde_json::from_str::<Request>(&line) else {
-                let ev = serde_json::to_string(&Event::Error { session: None, message: "요청 파싱 실패".into() }).unwrap();
-                let _ = wr.write_all(ev.as_bytes()).await;
-                let _ = wr.write_all(b"\n").await;
+                let _ = tx.send(Event::Error { session: None, message: "요청 파싱 실패".into() });
                 continue;
             };
             match req {
                 Request::SessionCreate { id } => {
                     self.sessions.lock().unwrap().insert(id.clone(), Mode::Chat);
-                    let ev = serde_json::to_string(&Event::ModeChanged { session: id, mode: Mode::Chat }).unwrap();
-                    let _ = wr.write_all(ev.as_bytes()).await; let _ = wr.write_all(b"\n").await;
+                    let _ = tx.send(Event::ModeChanged { session: id, mode: Mode::Chat });
                 }
                 Request::ModeSwitch { session, to } => {
-                    // §5: 모드 전환 자체가 승인 이벤트 — 셸이 ApprovalRespond로 확정
-                    let action = Action { tool: "mode.switch".into(), category: Category::ModeSwitch, app: None, target: Some(format!("{to:?}")) };
-                    let verdict = self.engine.lock().unwrap().evaluate(&action, Mode::Chat);
-                    let _ = verdict;
+                    // §5 모드 전환 승인은 프로토콜 계약 — 셸이 승인 배너로 사용자 확인 후에만 이 요청을 보낸다.
                     self.sessions.lock().unwrap().insert(session.clone(), to);
-                    let ev = serde_json::to_string(&Event::ModeChanged { session, mode: to }).unwrap();
-                    let _ = wr.write_all(ev.as_bytes()).await; let _ = wr.write_all(b"\n").await;
-                    // M1: 데몬 수준 승인 완료 가정(셸이 전환 확인 UI를 띄운 뒤에만 이 요청을 보낸다 — 프로토콜 계약)
+                    let _ = tx.send(Event::ModeChanged { session, mode: to });
                 }
-                Request::ApprovalRespond { session: _, approval, decision, always } => {
-                    if always {
-                        // §5 "항상 허용" — granted 규칙 추가 + 정책 파일 저장 (게이트 밖, 데몬 책임)
-                        let mut e = self.engine.lock().unwrap();
-                        e.grant_always(automaton_policy::Rule {
-                            name: format!("granted-{approval}"),
-                            tool: None, app: None, category: None, // M1: 세션 승인 시점 정보로 좁히는 것은 Chunk 5 셸 협업 과제
-                            verdict: automaton_policy::VerdictTemplate::Allow,
-                        });
-                        let _ = e.save(&self.paths.policy());
+                Request::ApprovalRespond { session, approval, decision: _, always } => {
+                    // 승인 id 검증 + 툴 스코프 규칙 — 팬텀 id·캐치올 Allow 전부 차단 (§5, 실측 보안 결함 반영)
+                    let tool = self.pending_asks.lock().unwrap().get(&approval).cloned();
+                    match tool {
+                        Some(tool) if always => {
+                            let mut e = self.engine.lock().unwrap();
+                            e.grant_always(Rule { name: format!("granted-{approval}-{tool}"), tool: Some(tool), app: None, category: None, verdict: VerdictTemplate::Allow });
+                            let _ = e.save(&self.paths.policy());
+                        }
+                        Some(_) => { /* 1회성 승인/거절 — Chunk 5 승인 채널 완성 시 게이트로 전달 */ }
+                        None => {
+                            let _ = tx.send(Event::Error { session: Some(session), message: format!("발행되지 않은 승인 id: {approval}") });
+                        }
                     }
-                    let _ = (approval, decision); // 실제 전달은 run_session의 채널 — M1 단순화: 승인 채널 등록은 아래 통합 테스트에서 검증
                 }
                 Request::MessageSend { session, text } => {
                     let d = self.clone();
-                    let mut w = wr.clone();
-                    tokio::spawn(async move { d.run_session(&session, &text, &mut w).await; });
+                    let tx = tx.clone();
+                    tokio::spawn(async move { d.run_session(&session, &text, tx).await });
                 }
-                Request::SessionList => {}
+                Request::SessionList => {
+                    // M1 미구현 — 무음 드롭 금지, 명시적 오류 응답
+                    let _ = tx.send(Event::Error { session: None, message: "SessionList는 M1 미구현".into() });
+                }
             }
         }
     }
 
-    async fn run_session(self: Arc<Self>, session: &str, text: &str, wr: &mut tokio::net::unix::OwnedWriteHalf) {
-        use tokio::io::AsyncWriteExt;
+    /// 연결당 단일 출력 루프: 힌트 주입 → 감사(최종 형태) → 결정 저널 → 소켓 출력
+    async fn writer_loop(self: Arc<Self>, mut rx: mpsc::UnboundedReceiver<Event>, mut wr: tokio::net::unix::OwnedWriteHalf) {
+        use std::io::Write;
+        while let Some(mut ev) = rx.recv().await {
+            let session = session_of(&ev);
+            // 1) Apprentice 힌트 주입 (§6) — ASK에 과거 유사 승인 부착 + 승인 id 등록
+            if let Event::ApprovalRequested { session: ref s, approval: ref id, ref mut action, hint: ref mut hint @ None } = ev {
+                if let Some(h) = self.apprentice.hint_for(action).ok().flatten() {
+                    action.risk = format!("{} · {}", action.risk, h.text);
+                    *hint = Some(h);
+                }
+                self.pending_asks.lock().unwrap().insert(id.clone(), action.tool.clone());
+            }
+            // 2) 감사 로그(§5) — 힌트 부착된 최종 형태 기록 (사후 분석 일관성)
+            if let Some(s) = &session {
+                if let Ok(line) = serde_json::to_string(&ev) {
+                    let path = self.paths.audit(s);
+                    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).ok(); }
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                        let _ = writeln!(f, "{line}");
+                    }
+                }
+            }
+            // 3) 결정 저널(§5·§6) — 이벤트 순서 기반 M1 근사:
+            //    ToolStarted = allow→실행(approve), ToolResult ok:false = 거부(deny)
+            if let Some(s) = &session {
+                match &ev {
+                    Event::ToolStarted { tool, .. } => {
+                        let _ = self.apprentice.note_decision(s, &ActionInfo { tool: tool.clone(), target: String::new(), risk: String::new() }, "allow", "approve");
+                    }
+                    Event::ToolResult { tool, ok: false, .. } => {
+                        let _ = self.apprentice.note_decision(s, &ActionInfo { tool: tool.clone(), target: String::new(), risk: String::new() }, "ask", "deny");
+                    }
+                    _ => {}
+                }
+            }
+            // 4) 소켓 출력
+            if let Ok(line) = serde_json::to_string(&ev) {
+                let _ = wr.write_all(line.as_bytes()).await;
+                let _ = wr.write_all(b"\n").await;
+            }
+        }
+    }
+
+    async fn run_session(self: Arc<Self>, session: &str, text: &str, tx: mpsc::UnboundedSender<Event>) {
         let mode = *self.sessions.lock().unwrap().get(session).unwrap_or(&Mode::Chat);
         let registry = match mode { Mode::Mac => automaton_tools::Registry::mac_set(), _ => automaton_tools::Registry::coding_set() };
         let engine = self.engine.lock().unwrap().clone();
-        let loop_ = AgentLoop::new(self.provider.as_ref(), DenyGate, engine, registry, mode);
+        // &dyn Provider 전달 — Chunk 2의 &P 포워딩 구현 사용 (Box 소유권 유지, 실측 E0277 반영)
+        let loop_ = AgentLoop::new(&*self.provider, DenyGate, engine, registry, mode);
         let mut history = self.store.messages(session).unwrap_or_default();
-        let mut audit = std::fs::OpenOptions::new().create(true).append(true).open(self.paths.audit(session)).expect("감사 로그 열기 실패");
-        let apprentice = &self.apprentice;
-        let session_owned = session.to_string();
-        let mut emit = |e: Event| {
-            // 감사 로그(§5): 모든 이벤트 기록
-            if let Ok(line) = serde_json::to_string(&e) { use std::io::Write; let _ = writeln!(audit, "{line}"); }
-            // Apprentice 힌트 주입(§6): 승인 요청에 과거 유사 승인 부착
-            let e = match e {
-                Event::ApprovalRequested { session, approval, mut action, hint: None } => {
-                    let h = apprentice.hint_for(&action).ok().flatten();
-                    if let Some(h) = &h { action.risk = format!("{} · {}", action.risk, h.text); }
-                    Event::ApprovalRequested { session, approval, action, hint }
-                }
-                other => other,
-            };
-            let _ = &session_owned;
-            if let Ok(line) = serde_json::to_string(&e) { let _ = wr.try_write(line.as_bytes()); let _ = wr.try_write(b"\n"); }
-        };
+        let mut emit = move |e: Event| { let _ = tx.send(e); }; // Send 클로저 — run_turn의 + Send 바운드 충족(실측 반영)
         let _ = loop_.run_turn(&mut history, text.to_string(), &mut emit).await;
         for m in &history { let _ = self.store.append_message(session, &m.role, &m.content); }
     }
 }
 
+fn session_of(ev: &Event) -> Option<String> {
+    match ev {
+        Event::StreamDelta { session, .. } | Event::ToolStarted { session, .. } | Event::ToolResult { session, .. }
+        | Event::ApprovalRequested { session, .. } | Event::ModeChanged { session, .. } => Some(session.clone()),
+        Event::Error { session, .. } => session.clone(),
+    }
+}
+
 /// 승인 없이 진행 불가 — M1 기본값: ASK는 거부(셸-데몬 승인 채널 완성 전 안전 기본값).
-/// E2E(§ Task 12)는 allow-only 시나리오로 검증하고, 셸 연동 승인 채널은 Chunk 5 과제다.
+/// E2E(Task 12)는 allow-only 시나리오로 검증하고, 승인 배너 왕복은 Chunk 5에서 pending 맵+oneshot 게이트로 완성한다.
 struct DenyGate;
 #[async_trait::async_trait]
 impl ApprovalGate for DenyGate {
@@ -2268,7 +2313,8 @@ impl ApprovalGate for DenyGate {
 }
 ```
 
-주의(M1 경계 명시): ① `try_write`는 논블로킹 — 버퍼 찬 경우 드롭 가능. M1 수용, Chunk 5에서 채널 기반 스트리밍으로 개량. ② ASK 승인 채널(oneshot)은 이 버전에서 미완 — DenyGate 안전 기본값 + allow/deny/정책거부 경로만 E2E 검증. 승인 배너 왕복은 Chunk 5에서 Gate가 pending 맵+oneshot으로 완성한다. ③ `wr.try_write`는 `&mut OwnedWriteHalf`에서 가변 차용 emit 안에서 호출 — 컴파일 오류 시 `poll_write` 래퍼 또는 `std::sync::Mutex<OwnedWriteHalf>`로 래핑할 것.
+주의(M1 경계 명시): ① ASK 승인 채널(oneshot 게이트)은 미완 — DenyGate 안전 기본값 + allow/정책거부 경로만 E2E 검증, 승인 왕복은 Chunk 5. ② 결정 저널의 target이 빈 문자열 — proto 이벤트에 target 필드가 없어 힌트 토큰 랭킹이 도구명 기준으로만 동작. Chunk 5에서 이벤트 확장 시 힌트 품질 상승. ③ 1회성 ApprovalRespond(decision만)는 게이트 미연결(Some(_) 분기 noop). ④ doctor의 screencapture 검사는 권한 거부 시에도 exit 0(배경화면만 캡처)일 수 있음 — 오탐 가능성 주석 처리.
+
 
 - [ ] **Step 2: main.rs 구현 (CLI + doctor)**
 
@@ -2277,10 +2323,9 @@ impl ApprovalGate for DenyGate {
 ```rust
 //! automatond — 참조 데몬 (§2). 개인 하네스는 이 구조를 베이스 크레이트 조립으로 대체한다.
 
-mod daemon;
+use automatond::daemon::{Daemon, Paths}; // lib.rs 경유 — bin 전용 크레이트는 통합 테스트에 노출되지 않음(실측 E0433 반영)
 
 use automaton_core::Provider;
-use daemon::{Daemon, Paths};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -2398,13 +2443,19 @@ async fn allow_path_runs_tool_streams_and_audits() {
     let socket = root.join("d.sock");
     let d = std::sync::Arc::new(Daemon::new(Box::new(provider), paths));
     tokio::spawn(d.clone().serve(socket.clone()));
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-    let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    // 서버 준비 재시도 — 고정 sleep은 부하 시 경합(리뷰 자문 반영)
+    let mut stream = None;
+    for _ in 0..10 {
+        if let Ok(s) = tokio::net::UnixStream::connect(&socket).await { stream = Some(s); break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let mut stream = stream.expect("데몬 소켓 연결 실패");
     let (rd, mut wr) = stream.into_split();
     let mut reader = BufReader::new(rd);
     wr.write_all(b"{\"method\":\"session_create\",\"params\":{\"id\":\"s1\"}}\n").await.unwrap();
-    wr.write_all(b"{\"method\":\"message_send\",\"params\":{\"session\":\"s1\",\"text\":\"기록해\"}}\n").await.unwrap();
+    // Chat 기본 모드에서는 fs.write가 ASK → DenyGate 거부되므로 code 모드로 전환 후 전송 (실측 반영)
+    wr.write_all(b"{\"method\":\"mode_switch\",\"params\":{\"session\":\"s1\",\"to\":\"code\"}}\n").await.unwrap();
+    wr.write_all("{\"method\":\"message_send\",\"params\":{\"session\":\"s1\",\"text\":\"기록해\"}}\n".as_bytes()).await.unwrap();
     let evs = read_events(&mut reader, "StreamDelta").await;
     assert!(evs.iter().any(|e| matches!(e, Event::ToolStarted { tool, .. } if tool == "fs.write")));
     assert!(evs.iter().any(|e| matches!(e, Event::ToolResult { ok: true, .. })));
