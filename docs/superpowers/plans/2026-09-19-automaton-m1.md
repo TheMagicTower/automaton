@@ -2218,13 +2218,14 @@ impl Daemon {
                 Request::ApprovalRespond { session, approval, decision: _, always } => {
                     // 승인 id 검증 + 툴 스코프 규칙 — 팬텀 id·캐치올 Allow 전부 차단 (§5, 실측 보안 결함 반영)
                     let tool = self.pending_asks.lock().unwrap().get(&approval).cloned();
+                    if tool.is_some() { self.pending_asks.lock().unwrap().remove(&approval); } // 1회용 — 낡은 id 재전송 재실행 방지 (리뷰 자문)
                     match tool {
                         Some(tool) if always => {
                             let mut e = self.engine.lock().unwrap();
                             e.grant_always(Rule { name: format!("granted-{approval}-{tool}"), tool: Some(tool), app: None, category: None, verdict: VerdictTemplate::Allow });
                             let _ = e.save(&self.paths.policy());
                         }
-                        Some(_) => { /* 1회성 승인/거절 — Chunk 5 승인 채널 완성 시 게이트로 전달 */ }
+                        Some(_) => { /* 1회성 승인/거절 — Task 14에서 게이트 채널로 전달 */ }
                         None => {
                             let _ = tx.send(Event::Error { session: Some(session), message: format!("발행되지 않은 승인 id: {approval}") });
                         }
@@ -2575,7 +2576,11 @@ import Network
 enum Mode: String, Codable, CaseIterable, Sendable { case code, mac, chat }
 
 struct ActionInfo: Codable, Sendable { let tool: String; let target: String; let risk: String }
-struct Hint: Codable, Sendable { let text: String; let similarCount: UInt }
+struct Hint: Codable, Sendable {
+    let text: String
+    let similarCount: UInt
+    enum CodingKeys: String, CodingKey { case text; case similarCount = "similar_count" } // 와이어 키는 serde 스네이크케이스 (실측 결함)
+}
 
 enum ShellEvent: Codable, Sendable {
     case streamDelta(session: String, delta: String)
@@ -2644,6 +2649,7 @@ actor DaemonConnection {
     }
 
     private func handleDisconnect() {
+        ready = false // 재접속 대비 큐 의미 보존 (리뷰 자문)
         continuation?.finish()
         continuation = nil
         connection = nil
