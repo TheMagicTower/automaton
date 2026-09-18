@@ -63,6 +63,8 @@ serde_json = "1"
 thiserror = "2"
 toml = "0.9"
 tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+async-trait = "0.1"
 ```
 
 `.gitignore`에 추가:
@@ -637,6 +639,7 @@ use automaton_policy::Category;
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
     #[error("{0}")] Message(String),
+    #[error("io: {0}")] Io(#[from] std::io::Error),
 }
 
 /// 모든 툴의 계약. category(args)는 툴이 자기 위험 분류를 args 기반으로 선언 (§5).
@@ -664,7 +667,7 @@ impl Registry {
         r.register(Box::new(FsWrite));
         r.register(Box::new(FsGrep));
         r.register(Box::new(FsDelete));
-        r.register(Box::new(ShellExec));
+        r.register(Box::new(ShellExec)); // Task 5 완료 후 등록 (ShellExec는 Task 5에서 정의)
         r.register(Box::new(EditApply));
         r
     }
@@ -718,7 +721,7 @@ impl Tool for FsWrite {
         let path = arg_str(args, "path")?;
         let content = arg_str(args, "content")?;
         if let Some(dir) = std::path::Path::new(&path).parent() { std::fs::create_dir_all(dir)?; }
-        std::fs::write(&path, content).map_err(|e| ToolError::Message(format!("쓰기 실패 {path}: {e}")))?;
+        std::fs::write(&path, &content).map_err(|e| ToolError::Message(format!("쓰기 실패 {path}: {e}")))?;
         Ok(format!("{path} 기록 완료 ({}바이트)", content.len()))
     }
 }
@@ -776,7 +779,7 @@ impl Tool for EditApply {
 }
 ```
 
-주의: `FsRead`의 `&s[..MAX]`는 UTF-8 경계에서 panic할 수 있다 — `s.char_indices().nth(...)` 방식 또는 `floor_char_boundary`(nightly) 대신 안전하게: `let cut = s.as_bytes().iter().rposition(|_| false)`; M1에선 다음 안전 절단으로 구현할 것:
+주의: `FsRead`의 `&s[..MAX]`는 UTF-8 경계에서 panic할 수 있다 — M1에선 다음 안전 절단 패턴으로 구현할 것:
 
 ```rust
 let cut = MAX.min(s.len());
@@ -807,7 +810,7 @@ git add -A && git commit -m "feat(tools): tool trait, registry, coding fs/grep/e
 
 ```rust
 use automaton_policy::Category;
-use automaton_tools::ShellExec;
+use automaton_tools::{ShellExec, Tool};
 use serde_json::json;
 
 #[test]
@@ -920,7 +923,7 @@ git add -A && git commit -m "feat(tools): shell.exec with deterministic command 
 ```rust
 use automaton_core::*;
 use automaton_policy::Engine;
-use automaton_proto::{Event, Mode};
+use automaton_proto::{ActionInfo, Event, Mode};
 use automaton_tools::Registry;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -931,8 +934,9 @@ impl Provider for Scripted {
     async fn complete(&self, _req: CompletionRequest) -> Result<Vec<StreamItem>, CoreError> {
         let mut i = self.call.lock().unwrap();
         let t = self.turns.lock().unwrap();
-        Ok(t.get(*i).cloned().unwrap_or_default())
-    }
+        let items = t.get(*i).cloned().unwrap_or_default();
+        *i += 1; // 턴 인덱스 전진 — 누락 시 모든 complete()가 turn 0 반환 (실측 결함 방지)
+        Ok(items)
 }
 
 struct AutoGate(ApprovalOutcome);
@@ -1056,7 +1060,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
+reqwest.workspace = true
 ```
 
 Run: `cargo test -p automaton-core`
@@ -1212,6 +1217,17 @@ pub trait ApprovalGate: Send + Sync {
     async fn decide(&self, action: ActionInfo) -> ApprovalOutcome;
 }
 
+// Box<dyn ...>로 감싼 트레이트 객체가 그대로 트레이트를 만족하도록 전달 구현 (테스트·데몬에서 Box 사용)
+#[async_trait::async_trait]
+impl<P: Provider + ?Sized> Provider for Box<P> {
+    async fn complete(&self, req: CompletionRequest) -> Result<Vec<StreamItem>, CoreError> { (**self).complete(req).await }
+}
+
+#[async_trait::async_trait]
+impl<G: ApprovalGate + ?Sized> ApprovalGate for Box<G> {
+    async fn decide(&self, action: ActionInfo) -> ApprovalOutcome { (**self).decide(action).await }
+}
+
 pub struct AgentLoop<P: Provider, G: ApprovalGate> {
     provider: P,
     gate: G,
@@ -1228,9 +1244,11 @@ impl<P: Provider, G: ApprovalGate> AgentLoop<P, G> {
     }
 
     pub async fn run_turn(&self, history: &mut Vec<Message>, user: String, emit: &mut dyn FnMut(Event)) -> Result<(), CoreError> {
+        const MAX_TURNS: usize = 32; // 비정상 프로바이더 무한 반복 방지 (§9)
         let session = "s".to_string(); // 세션 ID는 Chunk 4 데몬이 주입
         history.push(Message { role: "user".into(), content: user });
-        loop {
+        let mut consecutive_failures: usize = 0; // §9: 동일 툴 연속 실패 중단의 루프 수준 근사
+        for _ in 0..MAX_TURNS {
             let req = self.build_request(history);
             let items = self.provider.complete(req).await?;
             let mut assistant = String::new();
@@ -1244,9 +1262,16 @@ impl<P: Provider, G: ApprovalGate> AgentLoop<P, G> {
             history.push(Message { role: "assistant".into(), content: assistant });
             if calls.is_empty() { return Ok(()); }
             for call in calls {
+                let before = history.len();
                 self.run_tool_call(&session, &call, history, emit).await?;
+                let failed = matches!(history[before..].last(), Some(m) if m.content.contains("오류:") || m.content.contains("거부됨:") || m.content.contains("거절됨:"));
+                consecutive_failures = if failed { consecutive_failures + 1 } else { 0 };
+                if consecutive_failures >= 3 {
+                    return Err(CoreError::Message("동일 툴 연속 3회 실패 — 중단 (§9)".into()));
+                }
             }
         }
+        Err(CoreError::Message(format!("최대 턴 {MAX_TURNS} 초과 — 중단")))
     }
 
     fn build_request(&self, history: &[Message]) -> CompletionRequest {
@@ -1262,15 +1287,15 @@ impl<P: Provider, G: ApprovalGate> AgentLoop<P, G> {
             return Ok(());
         };
         let (app, target) = action_context(&call.args);
-        let action = Action { tool: call.name.clone(), category: tool.category(&call.args), app, target };
+        let action = Action { tool: call.name.clone(), category: tool.category(&call.args), app, target: target.clone() };
         let verdict = self.policy.evaluate(&action, self.profile.mode);
-        let info = ActionInfo { tool: call.name.clone(), target: target.clone().unwrap_or_default(), risk: summary_of(&action) };
+        let info = ActionInfo { tool: call.name.clone(), target: target.unwrap_or_default(), risk: summary_of(&action) };
         match verdict {
             Verdict::Allow => { self.execute_and_record(session, tool, call, history, emit); }
             Verdict::Ask { reason } => {
                 let id = self.approval_seq.fetch_add(1, Ordering::SeqCst).to_string();
-                emit(Event::ApprovalRequested { session: session.into(), approval: id, action: ActionInfo { risk: reason.clone(), ..info }, hint: None });
-                let outcome = self.gate.decide(ActionInfo { risk: reason, ..info }).await;
+                emit(Event::ApprovalRequested { session: session.into(), approval: id, action: ActionInfo { risk: reason.clone(), ..info.clone() }, hint: None });
+                let outcome = self.gate.decide(info).await;
                 match outcome {
                     ApprovalOutcome::Approve => self.execute_and_record(session, tool, call, history, emit),
                     ApprovalOutcome::Deny => {
@@ -1305,7 +1330,7 @@ fn truncate(s: &str, n: usize) -> String {
 }
 ```
 
-주의: ① `floor_char_boundary`은 아직 nightly 전용일 수 있다 — 컴파일 오류 시 `(0..=n).rev().find(|i| s.is_char_boundary(*i)).unwrap()` 절단으로 교체할 것 (FsRead와 동일 패턴). ② `tool.execute`는 동기 블로킹 — M1 수용, Chunk 4에서 `spawn_blocking` 래핑. ③ 감사 로그(모든 정책 결정 기록)·builtin+파일 정책 합성은 Chunk 4 데몬의 책임.
+주의: ① `floor_char_boundary`은 아직 nightly 전용일 수 있다 — 컴파일 오류 시 `(0..=n).rev().find(|i| s.is_char_boundary(*i)).unwrap()` 절단으로 교체할 것 (FsRead와 동일 패턴). ② `tool.execute`는 동기 블로킹 — M1 수용, Chunk 4에서 `spawn_blocking` 래핑. ③ 감사 로그(모든 정책 결정 기록)·builtin+파일 정책 합성은 Chunk 4 데몬의 책임. ④ 스펙 §5 code 툴셋의 `lsp`는 M1에서 제외, 후속 계획으로 지연. ⑤ proto의 `ApprovalRespond{always:true}`는 게이트가 아니라 Chunk 4 데몬이 `engine.grant_always`를 직접 호출하는 경로로 처리한다(게이트는 1회성 승인만 반환). ⑥ OpenAiCompat은 tool_call_id 없는 role:tool 직렬화라 실 엔드포인트에서 400 가능 — Chunk 4에서 실제 툴콜 직렬화(tool_call_id 포함)로 보강할 것. M1 검증은 Scripted 프로바이더로 수행한다.
 
 - [ ] **Step 4: 테스트 통과 확인**
 
