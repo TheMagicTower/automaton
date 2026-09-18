@@ -971,7 +971,7 @@ async fn run(provider: Box<dyn Provider>, gate: Box<dyn ApprovalGate>, user: &st
     let lp = AgentLoop::new(provider, gate, Engine::builtin(), Registry::coding_set(), Mode::Code);
     let mut history = vec![];
     let mut emit = |e: Event| events.push(e);
-    lp.run_turn(&mut history, user.to_string(), &mut emit).await.unwrap();
+    lp.run_turn("s1", &mut history, user.to_string(), &mut emit).await.unwrap();
     events
 }
 
@@ -1069,7 +1069,7 @@ async fn runaway_provider_stops_at_max_turns() {
     let p = Scripted { turns: Mutex::new(turns), call: Mutex::new(0) };
     let lp = AgentLoop::new(Box::new(p), Box::new(AutoGate(ApprovalOutcome::Approve)), Engine::builtin(), Registry::coding_set(), Mode::Code);
     let mut history = vec![];
-    let r = lp.run_turn(&mut history, "계속해".into(), &mut |_| {}).await;
+    let r = lp.run_turn("s1", &mut history, "계속해".into(), &mut |_| {}).await;
     assert!(r.is_err());
     assert!(r.unwrap_err().to_string().contains("최대 턴"));
 }
@@ -1081,7 +1081,7 @@ async fn triple_consecutive_failures_abort_turn() {
     let p = Scripted { turns: Mutex::new(vec![t(), t(), t(), vec![StreamItem::Delta("x".into())]]), call: Mutex::new(0) };
     let lp = AgentLoop::new(Box::new(p), Box::new(AutoGate(ApprovalOutcome::Approve)), Engine::builtin(), Registry::coding_set(), Mode::Code);
     let mut history = vec![];
-    let r = lp.run_turn(&mut history, "고장".into(), &mut |_| {}).await;
+    let r = lp.run_turn("s1", &mut history, "고장".into(), &mut |_| {}).await;
     assert!(r.is_err());
     assert!(r.unwrap_err().to_string().contains("연속 3회 실패"));
 }
@@ -1289,9 +1289,9 @@ impl<P: Provider, G: ApprovalGate> AgentLoop<P, G> {
         AgentLoop { provider, gate, policy, registry, profile, approval_seq: AtomicU32::new(1) }
     }
 
-    pub async fn run_turn(&self, history: &mut Vec<Message>, user: String, emit: &mut (dyn FnMut(Event) + Send)) -> Result<(), CoreError> {
+    pub async fn run_turn(&self, session: &str, history: &mut Vec<Message>, user: String, emit: &mut (dyn FnMut(Event) + Send)) -> Result<(), CoreError> {
         const MAX_TURNS: usize = 32; // 비정상 프로바이더 무한 반복 방지 (§9)
-        let session = "s".to_string(); // 세션 ID는 Chunk 4 데몬이 주입
+        let session = session.to_string(); // 데몬이 세션 id를 주입 (리뷰 반영 — 하드코딩 제거)
         history.push(Message { role: "user".into(), content: user });
         let mut consecutive_failures: usize = 0; // §9: 동일 툴 연속 실패 중단의 루프 수준 근사
         for _ in 0..MAX_TURNS {
@@ -1503,6 +1503,7 @@ impl MemoryStore {
     pub fn open(path: &std::path::Path) -> Result<Self> {
         if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
         let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?; // 데몬의 store·Apprentice 이중 연결 쓰기 충돌 대비 (리뷰 자문)
         conn.execute_batch("
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, session TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, at TEXT DEFAULT (datetime('now')));
@@ -1969,7 +1970,8 @@ Expected: FAIL — mac 툴 미정의.
 
 use crate::{Tool, ToolError};
 use automaton_policy::Category;
-use core_graphics::event::{CGEvent, CGEventSource, CGEventSourceStateID, CGEventTapLocation, CGMouseButton};
+use core_graphics::event::{CGEvent, CGEventTapLocation, CGMouseButton};
+use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 use serde_json::Value;
 
@@ -2160,6 +2162,8 @@ pub struct Daemon {
     sessions: Mutex<HashMap<String, Mode>>,
     /// 승인 id → 해당 승인 요청의 툴 — "항상 허용"을 툴 스코프로 제한·팬텀 id 차단 (§5)
     pending_asks: Mutex<HashMap<String, String>>,
+    /// 데몬 전역 승인 id 발급기 — 루프의 턴 로컬 seq 충돌 방지
+    approval_seq: std::sync::atomic::AtomicU64,
 }
 
 impl Daemon {
@@ -2172,7 +2176,7 @@ impl Daemon {
         let engine = Engine::from_file(&paths.policy()).unwrap_or_else(|_| Engine::builtin());
         let store = MemoryStore::open(&paths.memory()).expect("메모리 DB 열기 실패");
         let apprentice = Apprentice::open(&paths.memory()).expect("Apprentice DB 열기 실패");
-        Daemon { provider, paths, engine: Mutex::new(engine), apprentice, store, sessions: Mutex::new(HashMap::new()), pending_asks: Mutex::new(HashMap::new()) }
+        Daemon { provider, paths, engine: Mutex::new(engine), apprentice, store, sessions: Mutex::new(HashMap::new()), pending_asks: Mutex::new(HashMap::new()), approval_seq: std::sync::atomic::AtomicU64::new(1) }
     }
 
     pub async fn serve(self: Arc<Self>, socket: PathBuf) -> std::io::Result<()> {
@@ -2245,12 +2249,14 @@ impl Daemon {
         while let Some(mut ev) = rx.recv().await {
             let session = session_of(&ev);
             // 1) Apprentice 힌트 주입 (§6) — ASK에 과거 유사 승인 부착 + 승인 id 등록
-            if let Event::ApprovalRequested { session: ref s, approval: ref id, ref mut action, hint: ref mut hint @ None } = ev {
+            if let Event::ApprovalRequested { ref mut approval, ref mut action, hint: ref mut hint @ None, .. } = ev {
+                // 승인 id를 데몬 전역 유니크로 재발급 — 루프의 approval_seq가 턴마다 1로 재시작해 낡은 id 충돌 방지 (리뷰 자문)
+                *approval = format!("a{}", self.approval_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
                 if let Some(h) = self.apprentice.hint_for(action).ok().flatten() {
                     action.risk = format!("{} · {}", action.risk, h.text);
                     *hint = Some(h);
                 }
-                self.pending_asks.lock().unwrap().insert(id.clone(), action.tool.clone());
+                self.pending_asks.lock().unwrap().insert(approval.clone(), action.tool.clone());
             }
             // 2) 감사 로그(§5) — 힌트 부착된 최종 형태 기록 (사후 분석 일관성)
             if let Some(s) = &session {
@@ -2487,7 +2493,7 @@ tokio.workspace = true
 async-trait.workspace = true
 ```
 
-`daemon.rs` 상단 `pub mod` 노출: main.rs에서 `mod daemon;`으로 쓰던 것을 테스트 접근 가능하게 `pub mod daemon;`로 변경.
+`reference/automatond/src/lib.rs` 파일을 생성한다 — 내용은 한 줄: `pub mod daemon;` (라이브러리 타깃 노출, Task 11 Files에 명시됨). main.rs의 구 `mod daemon;` 선언은 이미 `use automatond::daemon::...` import로 대체되었다.
 
 Run: `cargo test -p automatond`
 Expected: 1 passed.
