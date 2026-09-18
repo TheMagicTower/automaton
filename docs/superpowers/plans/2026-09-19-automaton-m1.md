@@ -87,7 +87,7 @@ for c in proto policy tools memory apprentice core; do
 done
 cargo new reference/automatond --name automatond
 ```
-각 `crates/*/Cargo.toml`에 공통 헤더 추가:
+각 `crates/*/Cargo.toml`의 `cargo new`가 생성한 `[package]` 테이블을 아래 공통 상속 헤더로 **교체** (그대로 추가하면 TOML 중복 테이블 오류로 `cargo check` 실패):
 
 ```toml
 [package]
@@ -268,12 +268,22 @@ fn builtin_allows_code_mode_edits_but_asks_in_other_modes() {
 }
 
 #[test]
-fn destructive_actions_always_ask() {
+fn destructive_and_external_actions_always_ask() {
     for mode in [Mode::Code, Mode::Mac, Mode::Chat] {
         let e = Engine::builtin();
         assert!(matches!(e.evaluate(&action("fs.delete", Category::Destructive), mode), Verdict::Ask { .. }));
         assert!(matches!(e.evaluate(&action("shell.exec", Category::External), mode), Verdict::Ask { .. }));
     }
+}
+
+#[test]
+fn input_defaults_to_ask_even_in_mac_mode_until_granted() {
+    // 스펙 §5: 미등록 앱 클릭·타이핑 → ASK. 등록(=grant_always) 이후에만 Allow.
+    let mut e = Engine::builtin();
+    let a = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.apple.finder".into()), target: None };
+    assert!(matches!(e.evaluate(&a, Mode::Mac), Verdict::Ask { .. }));
+    e.grant_always(Rule { name: "finder-input".into(), tool: Some("input.type".into()), app: Some("com.apple.finder".into()), category: None, verdict: VerdictTemplate::Allow });
+    assert!(matches!(e.evaluate(&a, Mode::Mac), Verdict::Allow));
 }
 
 #[test]
@@ -300,6 +310,18 @@ fn mode_switch_always_asks() {
 }
 
 #[test]
+fn owner_grant_overrides_builtin_deny_app_but_never_password_fields() {
+    // 스펙 §5: 민감 영역은 소유자가 명시적으로 등록(화이트리스트)한 경우에만 허용.
+    let mut e = Engine::builtin();
+    let bank = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.some.bank".into()), target: None };
+    assert!(matches!(e.evaluate(&bank, Mode::Mac), Verdict::Deny { .. })); // builtin deny-app 규칙
+    e.grant_always(Rule { name: "owner-trusts-bank".into(), tool: Some("input.type".into()), app: Some("com.some.bank".into()), category: None, verdict: VerdictTemplate::Allow });
+    assert!(matches!(e.evaluate(&bank, Mode::Mac), Verdict::Allow)); // 명시 등록 → 허용
+    let pw = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.some.bank".into()), target: Some("SecureTextField".into()) };
+    assert!(matches!(e.evaluate(&pw, Mode::Mac), Verdict::Deny { .. })); // 비밀번호 필드는 절대 불가
+}
+
+#[test]
 fn grant_always_persists_and_allows_future_matching() {
     let mut e = Engine::builtin();
     let a = action("fs.delete", Category::Destructive);
@@ -309,7 +331,7 @@ fn grant_always_persists_and_allows_future_matching() {
 }
 
 #[test]
-fn policy_file_roundtrip() {
+fn policy_file_roundtrip_persists_granted_rules() {
     let mut e = Engine::builtin();
     e.grant_always(Rule { name: "trash-downloads".into(), tool: Some("fs.delete".into()), app: None, category: Some(Category::Destructive), verdict: VerdictTemplate::Allow });
     let dir = std::env::temp_dir().join(format!("automaton-policy-{}", std::process::id()));
@@ -388,10 +410,12 @@ pub enum PolicyError {
 }
 
 #[derive(Serialize, Deserialize)]
-struct PolicyFile { rules: Vec<Rule> }
+struct PolicyFile { granted: Vec<Rule>, rules: Vec<Rule> }
 
+/// granted = 소유자 명시 서명("항상 허용") — builtin/파일 규칙보다 우선하되
+/// 비밀번호 필드 정적 거부는 절대 우회 불가. rules = builtin + 정책 파일 규칙.
 #[derive(Debug, Clone)]
-pub struct Engine { rules: Vec<Rule> }
+pub struct Engine { granted: Vec<Rule>, rules: Vec<Rule> }
 
 impl Engine {
     /// 스펙 §5 기본 위험 분류
@@ -399,45 +423,57 @@ impl Engine {
         let ask = |name: &str, category: Category| Rule {
             name: name.into(), tool: None, app: None, category: Some(category), verdict: VerdictTemplate::Ask,
         };
-        Engine { rules: vec![
-            // ASK: 파괴·외부·시스템·입력 (모드전환은 evaluate에서 무조건 Ask)
-            ask("ask-destructive", Category::Destructive),
-            ask("ask-external", Category::External),
-            ask("ask-system", Category::System),
-            ask("ask-mode-switch", Category::ModeSwitch),
-            ask("ask-input", Category::Input),
-        ] }
+        let deny_app = |app: &str| Rule {
+            name: format!("deny-app-{app}"), tool: None, app: Some(app.into()), category: None, verdict: VerdictTemplate::Deny,
+        };
+        Engine {
+            granted: vec![],
+            rules: vec![
+                // DENY: 금지 앱 초기값 (소유자 grant_always로만 해제 가능, §5 민감 영역 화이트리스트)
+                deny_app("com.some.bank"),
+                deny_app("com.apple.MobileSMS"),
+                // ASK: 파괴·외부·시스템·입력 (모드전환은 evaluate에서 무조건 Ask)
+                ask("ask-destructive", Category::Destructive),
+                ask("ask-external", Category::External),
+                ask("ask-system", Category::System),
+                ask("ask-input", Category::Input),
+            ],
+        }
     }
 
-    pub fn with_rules(rules: Vec<Rule>) -> Self { Engine { rules } }
+    pub fn with_rules(rules: Vec<Rule>) -> Self { Engine { granted: vec![], rules } }
 
-    /// 결정론적 평가: 1) 민감 타깃(비밀번호 필드·금지 앱) DENY 2) DENY 규칙 3) 파일 순서 규칙 4) 카테고리 기본값
+    /// 결정론적 평가 순서:
+    /// 1) 비밀번호 필드 → 정적 DENY (그 무엇도 우회 불가)
+    /// 2) 소유자 명시 granted → Allow (§5 민감 영역 명시 등록 = 화이트리스트)
+    /// 3) 명시 DENY 규칙 (규칙 목록 내 Allow보다 항상 우선)
+    /// 4) 모드 전환 → 항상 ASK
+    /// 5) 나머지 규칙 첫 매치
+    /// 6) 카테고리×모드 기본값
     pub fn evaluate(&self, a: &Action, mode: Mode) -> Verdict {
-        // 1. 민감 타깃 — 정적 금지 (모드 무관, 우회 불가)
+        // 1. 민감 입력 필드 — 하드 거부
         if let Some(t) = &a.target {
             if t.contains("SecureTextField") || t.contains("Password") {
                 return Verdict::Deny { reason: format!("민감 입력 필드: {t}") };
             }
         }
-        if let Some(app) = &a.app {
-            const DENY_APPS: &[&str] = &["com.some.bank", "com.apple.MobileSMS"]; // 초기값, 정책 파일으로 확장
-            if DENY_APPS.contains(&app.as_str()) {
-                return Verdict::Deny { reason: format!("금지 앱: {app}") };
-            }
+        // 2. 소유자 명시 허용 최우선 (파일 저장·재시작 후에도 유지)
+        if let Some(r) = self.granted.iter().find(|r| r.verdict == VerdictTemplate::Allow && matches(r, a)) {
+            return Verdict::Allow;
         }
-        // 2. 명시 DENY 규칙 최우선
+        // 3. 명시 DENY 규칙
         if let Some(r) = self.rules.iter().find(|r| r.verdict == VerdictTemplate::Deny && matches(r, a)) {
             return Verdict::Deny { reason: format!("규칙 {}: 거부", r.name) };
         }
-        // 3. 모드전환은 언제나 승인 (§5)
+        // 4. 모드 전환은 언제나 승인 (§5)
         if a.category == Category::ModeSwitch {
             return Verdict::Ask { reason: "모드 전환".into() };
         }
-        // 4. 나머지 규칙 — 첫 매치
+        // 5. 나머지 규칙 — 첫 매치
         if let Some(r) = self.rules.iter().find(|r| r.verdict != VerdictTemplate::Deny && matches(r, a)) {
             return from_template(&r.verdict, a);
         }
-        // 5. 카테고리×모드 기본값
+        // 6. 카테고리×모드 기본값 — Input은 등록(granted) 전까지 모든 모드에서 ASK (§5 미등록 앱)
         match (a.category, mode) {
             (Category::Read, _) => Verdict::Allow,
             (Category::Write, Mode::Code) => Verdict::Allow,
@@ -445,24 +481,23 @@ impl Engine {
             (Category::Destructive, _) => Verdict::Ask { reason: format!("{} 파괴 동작", short(a)) },
             (Category::External, _) => Verdict::Ask { reason: format!("{} 외부 실행", short(a)) },
             (Category::System, _) => Verdict::Ask { reason: format!("{} 시스템 변경", short(a)) },
-            (Category::Input, Mode::Mac) => Verdict::Allow, // mac 모드 등록 앱 입력
-            (Category::Input, _) => Verdict::Ask { reason: format!("{} 미등록 컨텍스트 입력", short(a)) },
+            (Category::Input, _) => Verdict::Ask { reason: format!("{} 미등록 앱 입력", short(a)) },
             (Category::ModeSwitch, _) => unreachable!(),
         }
     }
 
-    /// "항상 허용" — 규칙 추가 후 정책 파일 저장 대상
-    pub fn grant_always(&mut self, rule: Rule) { self.rules.push(rule); }
+    /// "항상 허용" — granted에 추가, 정책 파일 저장 대상
+    pub fn grant_always(&mut self, rule: Rule) { self.granted.push(rule); }
 
     pub fn from_file(path: &std::path::Path) -> Result<Self, PolicyError> {
         let raw = std::fs::read_to_string(path)?;
         let f: PolicyFile = toml::from_str(&raw)?;
-        Ok(Engine::with_rules(f.rules))
+        Ok(Engine { granted: f.granted, rules: f.rules })
     }
 
     pub fn save(&self, path: &std::path::Path) -> Result<(), PolicyError> {
         if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
-        let f = PolicyFile { rules: self.rules.clone() };
+        let f = PolicyFile { granted: self.granted.clone(), rules: self.rules.clone() };
         std::fs::write(path, toml::to_string(&f)?)?;
         Ok(())
     }
@@ -486,12 +521,12 @@ fn from_template(t: &VerdictTemplate, a: &Action) -> Verdict {
 fn short(a: &Action) -> &str { &a.tool }
 ```
 
-주의: 매처가 전부 None인 규칙은 모든 액션에 매치되므로(캐치올), builtin에는 DENY 캐치올을 두지 않는다. DENY는 ①민감 타깃 정적 검사(비밀번호 필드) ②금지 앱 목록 ③명시 DENY 규칙(최소 하나의 매처 보유 권장) 3경로로만 발생한다. 테스트 `deny_takes_precedence_over_allow_regardless_of_order`는 DENY_APPS 밖 앱(com.example.app)으로 규칙 우선순위 자체를 검증한다.
+주의: ① 매처가 전부 None인 규칙은 캐치올이므로 builtin에 두지 않는다. ② DENY 경로는 비밀번호 필드(정적, 불가침)와 명시 deny 규칙뿐이며, 금지 앱은 deny 규칙으로 구현돼 소유자 grant_always로만 해제된다(§5 화이트리스트). ③ granted 우선순위가 rules의 Allow/Deny보다 앞서므로 "항상 허용"이 즉시 효과를 갖는다 — 비밀번호 필드만은 예외. ④ 감사 로그(모든 정책 결정 기록)와 mac 모드 셸 허용 명령 allowlist는 Chunk 4(데몬)·Chunk 2(셸 툴)에서 구현한다.
 
 - [ ] **Step 4: 테스트 통과 확인**
 
 Run: `cargo test -p automaton-policy`
-Expected: 8 passed.
+Expected: 10 passed.
 
 - [ ] **Step 5: Commit**
 
