@@ -58,9 +58,11 @@ impl Registry {
 
 /// args에서 정책 Action의 app/target 필드를 추출 (없으면 None)
 pub fn action_context(args: &serde_json::Value) -> (Option<String>, Option<String>) {
-    let target = args.get("target")
-        .or_else(|| args.get("path"))
+    // 보안 불변식: 실행 피연산자(path, command)를 우선 추출하여
+    // 모델이 주입한 미선언 decoy 'target' 인자가 배너 및 민감필드 검사를 가로채는 우회를 원천 방지
+    let target = args.get("path")
         .or_else(|| args.get("command"))
+        .or_else(|| args.get("target"))
         .and_then(|v| v.as_str())
         .map(String::from);
     (args.get("app").and_then(|v| v.as_str()).map(String::from), target)

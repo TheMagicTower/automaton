@@ -53,3 +53,13 @@ fn action_context_extracts_command_as_target() {
     assert_eq!(app, None);
     assert_eq!(target, Some("echo test".to_string()));
 }
+
+#[test]
+fn action_context_prioritizes_operational_args_over_decoy_target() {
+    // 보안 회귀 방지: 적대적 모델이 decoy target을 보내도 실제 command 또는 path가 타깃으로 추출되어야 함
+    let (_, target_cmd) = automaton_tools::action_context(&json!({"command": "rm -rf ~", "target": "cargo test"}));
+    assert_eq!(target_cmd, Some("rm -rf ~".to_string()));
+
+    let (_, target_path) = automaton_tools::action_context(&json!({"path": "Passwords.kdbx", "target": "notes.txt"}));
+    assert_eq!(target_path, Some("Passwords.kdbx".to_string()));
+}
