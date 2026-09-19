@@ -29,17 +29,40 @@ final class ShellModel {
     var pendingApproval: (id: String, action: ActionInfo, hint: Hint?)?
     var draftSuggestions: [String] = []
     var connected = false
-    let voiceOutput = VoiceOutputManager() // §12 1단계 TTS — streamDelta 구독
+    var memoryCount: Int = 0
+    let voiceOutput = VoiceOutputManager()
     private let conn = DaemonConnection()
-    private let session = "shell-\(UInt64(Date().timeIntervalSince1970))"
+    private var session = "shell-\(UInt64(Date().timeIntervalSince1970))"
     private var started = false
+
+    /// 새 세션 — 기존 대화 스트림 클리어 + 새 세션 ID로 재연결
+    func newSession() {
+        stream = []
+        pendingApproval = nil
+        draftSuggestions = []
+        session = "shell-\(UInt64(Date().timeIntervalSince1970))"
+        Task {
+            await conn.sendRequest(method: "session_create", params: ["id": session])
+        }
+    }
+
+    /// 메모리 조회 — 에이전트가 알고 있는 사용자 정보 표시
+    func queryMemory() {
+        stream.append("\n🧠 기억 조회 중...")
+        Task {
+            await conn.sendRequest(method: "message_send", params: [
+                "session": session,
+                "text": "지금까지 알게 된 나에 대한 정보를 모두 나열해주세요. 메모리에 저장된 사실만 기반으로 답하세요."
+            ])
+        }
+    }
 
     func start() {
         guard !started else { return }
         started = true
         Task {
-            let stream = await conn.events() // 연결 수립을 먼저 확정
-            await conn.sendRequest(method: "session_create", params: ["id": session]) // 송신은 ready 전 큐잉됨
+            let stream = await conn.events()
+            await conn.sendRequest(method: "session_create", params: ["id": session])
             for await ev in stream {
                 connected = true
                 apply(ev)
@@ -53,7 +76,7 @@ final class ShellModel {
         case .streamDelta(_, let delta): stream.append(delta); voiceOutput.append(delta: delta)
         case .toolStarted(_, let tool, _): stream.append("\n⚙ \(tool)"); voiceOutput.flush()
         case .toolResult(_, let tool, let ok, let summary): stream.append(ok ? " ✓ \(tool)" : " ✗ \(tool): \(summary)")
-        case .approvalRequested(_, let id, let action, let hint): pendingApproval = (id, action, hint); draftSuggestions = [] // 새 배너에는 낡은 칩 없음
+        case .approvalRequested(_, let id, let action, let hint): pendingApproval = (id, action, hint); draftSuggestions = []
         case .draftSuggestions(_, let suggestions): draftSuggestions = suggestions
         case .modeChanged(_, let mode): self.mode = mode
         case .error(_, let message): stream.append("\n⚠ \(message)")
@@ -61,12 +84,11 @@ final class ShellModel {
     }
 
     func send(_ text: String) {
-        voiceOutput.interrupt() // 새 입력 → 음성 재생 즉시 중지
+        voiceOutput.interrupt()
         stream.append("\n▸ \(text)")
         Task { await conn.sendRequest(method: "message_send", params: ["session": session, "text": text]) }
     }
 
-    /// §5 모드 전환 승인 — 확인 대화상자 후에만 전송 (프로토콜 계약)
     func requestMode(_ to: Mode) {
         Task { await conn.sendRequest(method: "mode_switch", params: ["session": session, "to": to.rawValue]) }
     }
@@ -75,7 +97,6 @@ final class ShellModel {
         guard let p = pendingApproval else { return }
         Task { await conn.sendRequest(method: "approval_respond", params: ["session": session, "approval": p.id, "decision": approve ? "approve" : "deny", "always": always]) }
         pendingApproval = nil
-        draftSuggestions = []
     }
 }
 
@@ -115,18 +136,33 @@ struct ShellView: View {
     }
 
     private var modeBar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             Theme.title("automaton")
             Spacer()
             ForEach(Mode.allCases, id: \.self) { m in
                 Button { confirmMode = m } label: {
-                    Text(m == .code ? "⚙ code" : m == .mac ? "🔭 mac" : "📖 chat")
-                        .font(.system(size: 12, design: .serif)).padding(.horizontal, 10).padding(.vertical, 3)
+                    Text(m == .code ? "⚙" : m == .mac ? "🔭" : "📖")
+                        .font(.system(size: 13))
+                        .padding(.horizontal, 8).padding(.vertical, 3)
                         .background(Capsule().fill(model.mode == m ? AnyShapeStyle(LinearGradient(colors: [Theme.gold.opacity(0.9), Theme.brass], startPoint: .top, endPoint: .bottom)) : AnyShapeStyle(Color.clear)))
                         .overlay(Capsule().strokeBorder(model.mode == m ? Theme.gold : Theme.dim.opacity(0.6)))
                         .foregroundStyle(model.mode == m ? Theme.walnut : Theme.dim)
                 }.buttonStyle(.plain)
             }
+            // 새 세션 버튼
+            Button { model.newSession() } label: {
+                Image(systemName: "plus.message")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.gold)
+            }.buttonStyle(.plain).help("새 세션")
+
+            // 메모리 조회 버튼
+            Button { model.queryMemory() } label: {
+                Image(systemName: "brain")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.gold)
+            }.buttonStyle(.plain).help("기억 조회")
+
             voiceStatus
             voiceToggle
         }.padding(10)
