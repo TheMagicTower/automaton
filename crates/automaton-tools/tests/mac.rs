@@ -17,6 +17,12 @@ fn input_tools_require_args() {
 }
 
 #[test]
+fn capture_screen_rejects_flag_injection_paths() {
+    assert!(CaptureScreen.execute(&json!({"path": "-c"})).is_err());
+    assert!(CaptureScreen.execute(&json!({"path": "-P"})).is_err());
+}
+
+#[test]
 fn ax_summary_parses_frontmost_json() {
     let s = AxRead.parse_summary(r#"{"app":"Finder","title":"Downloads"}"#).unwrap();
     assert_eq!(s.app, "Finder");

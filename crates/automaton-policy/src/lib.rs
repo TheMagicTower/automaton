@@ -91,9 +91,10 @@ impl Engine {
     /// 5) 나머지 규칙 첫 매치
     /// 6) 카테고리×모드 기본값
     pub fn evaluate(&self, a: &Action, mode: Mode) -> Verdict {
-        // 1. 민감 입력 필드 — 하드 거부
+        // 1. 민감 입력 필드 — 하드 거부 (대소문자 무관, 하드코딩된 민감 키워드 검사)
         if let Some(t) = &a.target {
-            if t.contains("SecureTextField") || t.contains("Password") {
+            let lower = t.to_lowercase();
+            if lower.contains("securetextfield") || lower.contains("password") || lower.contains("passcode") || lower.contains("secret") || lower.contains("pin") {
                 return Verdict::Deny { reason: format!("민감 입력 필드: {t}") };
             }
         }
@@ -101,13 +102,18 @@ impl Engine {
         if a.category == Category::ModeSwitch {
             return Verdict::Ask { reason: "모드 전환".into() };
         }
-        // 3. 소유자 명시 허용 (파일 저장·재시작 후에도 유지)
-        if self.granted.iter().any(|r| r.verdict == VerdictTemplate::Allow && matches(r, a)) {
+        // 3. 소유자 명시 앱 특정 허용:
+        // 앱 특정 명시 허용(r.app.is_some())은 명시 DENY도 오버라이드 (§5 소유자 화이트리스트).
+        if self.granted.iter().any(|r| r.verdict == VerdictTemplate::Allow && r.app.is_some() && matches(r, a)) {
             return Verdict::Allow;
         }
-        // 4. 명시 DENY 규칙
+        // 4. 명시 DENY 규칙 (앱 미지정 일반 허용보다 항상 우선하여 은행/금지 앱 보호)
         if let Some(r) = self.rules.iter().find(|r| r.verdict == VerdictTemplate::Deny && matches(r, a)) {
             return Verdict::Deny { reason: format!("규칙 {}: 거부", r.name) };
+        }
+        // 4.5. 앱 미지정 일반 소유자 허용 (비-DENY 앱/카테고리만 허용)
+        if self.granted.iter().any(|r| r.verdict == VerdictTemplate::Allow && matches(r, a)) {
+            return Verdict::Allow;
         }
         // 5. 나머지 규칙 — 첫 매치
         if let Some(r) = self.rules.iter().find(|r| r.verdict != VerdictTemplate::Deny && matches(r, a)) {

@@ -38,6 +38,21 @@ fn compound_commands_always_classify_external() {
 }
 
 #[test]
+fn write_flags_in_read_commands_classify_external() {
+    // git diff/show 등의 --output 플래그를 통한 비승인 파일 덮어쓰기 우회 방지
+    for cmd in [
+        "git diff --output=pwned.txt",
+        "git diff --output pwned.txt",
+        "git show --output=/etc/evil",
+        "git log -o out.txt",
+        "git diff -o=out.txt",
+        "git show -o",
+    ] {
+        assert_eq!(ShellExec.category(&json!({"command": cmd})), Category::External, "{cmd}");
+    }
+}
+
+#[test]
 fn missing_command_arg_is_error() {
     assert!(ShellExec.execute(&json!({})).is_err());
 }

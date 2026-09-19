@@ -68,6 +68,11 @@ impl Daemon {
     pub async fn serve(self: Arc<Self>, socket: PathBuf) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&socket);
         let listener = UnixListener::bind(&socket)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
+        }
         eprintln!("automatond listening at {}", socket.display());
         loop {
             let (stream, _) = listener.accept().await?;

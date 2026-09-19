@@ -22,6 +22,9 @@ impl Tool for CaptureScreen {
     fn execute(&self, args: &Value) -> Result<String, ToolError> {
         let path = args.get("path").and_then(|v| v.as_str()).map(String::from)
             .unwrap_or_else(|| std::env::temp_dir().join(format!("automaton-capture-{}.png", std::process::id())).to_string_lossy().into());
+        if path.starts_with('-') {
+            return Err(ToolError::Message("경로는 '-'로 시작할 수 없습니다 (옵션 주입 방지)".into()));
+        }
         let out = std::process::Command::new("screencapture").arg("-x").arg(&path).output()
             .map_err(|e| ToolError::Message(format!("screencapture 실행 실패: {e}")))?;
         if !out.status.success() {

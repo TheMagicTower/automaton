@@ -47,6 +47,30 @@ fn sensitive_targets_are_denied_regardless_of_rules() {
 }
 
 #[test]
+fn sensitive_targets_denied_case_insensitive() {
+    let e = Engine::builtin();
+    for target in ["password", "PASSWORD", "user_password_field", "my_passcode", "pin_code", "secret_token"] {
+        let a = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.apple.finder".into()), target: Some(target.into()) };
+        assert!(matches!(e.evaluate(&a, Mode::Mac), Verdict::Deny { .. }), "target: {target}");
+    }
+}
+
+#[test]
+fn wildcard_app_grant_does_not_override_deny_app_rules() {
+    let mut e = Engine::builtin();
+    // input.type 툴 전체에 대해 app: None으로 일반 허용 등록
+    e.grant_always(Rule { name: "grant-all-input".into(), tool: Some("input.type".into()), app: None, category: None, verdict: VerdictTemplate::Allow });
+    
+    // 일반 앱은 허용됨
+    let normal = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.example.app".into()), target: None };
+    assert!(matches!(e.evaluate(&normal, Mode::Mac), Verdict::Allow));
+
+    // 하지만 금지 앱(com.some.bank)은 여전히 DENY되어야 함 (일반 와일드카드 그랜트로 뚫리지 않음)
+    let bank = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.some.bank".into()), target: None };
+    assert!(matches!(e.evaluate(&bank, Mode::Mac), Verdict::Deny { .. }));
+}
+
+#[test]
 fn deny_takes_precedence_over_allow_regardless_of_order() {
     let e = Engine::with_rules(vec![
         Rule { name: "allow-all-input".into(), tool: Some("input.type".into()), app: None, category: None, verdict: VerdictTemplate::Allow },

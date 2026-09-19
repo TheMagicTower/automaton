@@ -17,6 +17,10 @@ fn first_word_classify(cmd: &str) -> Category {
     let c = cmd.trim_start();
     // 복합 명령 우회 방지: 메타문자 포함 시 무조건 External (항상 ASK)
     if METACHARS.iter().any(|m| c.contains(m)) { return Category::External; }
+    // 파일 출력/쓰기 플래그 우회 방지 (예: git diff/log/show --output=...)
+    if c.contains("--output") || c.contains(" -o ") || c.contains(" -o=") || c.ends_with(" -o") {
+        return Category::External;
+    }
     if READ_PREFIXES.iter().any(|p| c == *p || c.starts_with(&format!("{p} "))) { Category::Read }
     else if WRITE_PREFIXES.iter().any(|p| c == *p || c.starts_with(&format!("{p} "))) { Category::Write }
     else { Category::External }
