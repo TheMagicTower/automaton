@@ -1,16 +1,25 @@
+import AppKit
 import SwiftUI
 
 @main
-struct AutomatonApp: App {
-    @State private var model = ShellModel()
-    @State private var voiceInput = VoiceInputManager()
-    var body: some Scene {
-        MenuBarExtra("automaton", systemImage: "gearshape.fill") {
-            ShellView().environment(model).environment(voiceInput).frame(width: 380, height: 480)
-        }
-        .menuBarExtraStyle(.window)
+@MainActor
+final class AutomatonAppDelegate: NSObject, NSApplicationDelegate {
+    private var menuBar = MenuBarController()
+    private let model = ShellModel()
+    private let voiceInput = VoiceInputManager()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // MenuBarExtra 대신 NSStatusItem + NSPopover 사용
+        // (키보드 입력 무반응 + 클릭 시 자동 닫힘 결함 해결)
+        menuBar.setup(model: model, voiceInput: voiceInput)
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false // 메뉴바 앱은 창이 없어도 유지
     }
 }
+
+// MARK: - ShellModel (기존 로직 유지)
 
 @Observable
 @MainActor
@@ -165,12 +174,16 @@ struct ShellView: View {
         }
     }
 
+    @FocusState private var inputFocused: Bool
+
     private var inputBar: some View {
         HStack {
             TextField("명령…", text: $draft).textFieldStyle(.plain).foregroundStyle(Theme.ivory)
+                .focused($inputFocused)
                 .onSubmit { if !draft.isEmpty { model.send(draft); draft = "" } }
             Button { if !draft.isEmpty { model.send(draft); draft = "" } } label: { Image(systemName: "paperplane.fill").foregroundStyle(Theme.gold) }.buttonStyle(.plain)
         }.padding(10)
+        .onAppear { inputFocused = true }
     }
 }
 
