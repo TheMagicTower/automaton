@@ -21,4 +21,6 @@ targets:
         CODE_SIGNING_REQUIRED: "NO"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Automaton
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Push-to-Talk 음성 입력을 위해 마이크 접근이 필요합니다."
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "음성 명령 인식을 위해 음성 인식 권한이 필요합니다."
         ENABLE_HARDENED_RUNTIME: NO

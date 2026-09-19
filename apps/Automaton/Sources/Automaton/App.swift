@@ -3,9 +3,10 @@ import SwiftUI
 @main
 struct AutomatonApp: App {
     @State private var model = ShellModel()
+    @State private var voiceInput = VoiceInputManager()
     var body: some Scene {
         MenuBarExtra("automaton", systemImage: "gearshape.fill") {
-            ShellView().environment(model).frame(width: 380, height: 480)
+            ShellView().environment(model).environment(voiceInput).frame(width: 380, height: 480)
         }
         .menuBarExtraStyle(.window)
     }
@@ -18,6 +19,7 @@ final class ShellModel {
     var stream: [String] = []
     var pendingApproval: (id: String, action: ActionInfo, hint: Hint?)?
     var connected = false
+    let voiceOutput = VoiceOutputManager() // §12 1단계 TTS — streamDelta 구독
     private let conn = DaemonConnection()
     private let session = "shell-\(UInt64(Date().timeIntervalSince1970))"
     private var started = false
@@ -38,8 +40,8 @@ final class ShellModel {
 
     private func apply(_ ev: ShellEvent) {
         switch ev {
-        case .streamDelta(_, let delta): stream.append(delta)
-        case .toolStarted(_, let tool, _): stream.append("\n⚙ \(tool)")
+        case .streamDelta(_, let delta): stream.append(delta); voiceOutput.append(delta: delta)
+        case .toolStarted(_, let tool, _): stream.append("\n⚙ \(tool)"); voiceOutput.flush()
         case .toolResult(_, let tool, let ok, let summary): stream.append(ok ? " ✓ \(tool)" : " ✗ \(tool): \(summary)")
         case .approvalRequested(_, let id, let action, let hint): pendingApproval = (id, action, hint)
         case .modeChanged(_, let mode): self.mode = mode
@@ -48,6 +50,7 @@ final class ShellModel {
     }
 
     func send(_ text: String) {
+        voiceOutput.interrupt() // 새 입력 → 음성 재생 즉시 중지
         stream.append("\n▸ \(text)")
         Task { await conn.sendRequest(method: "message_send", params: ["session": session, "text": text]) }
     }
@@ -66,6 +69,7 @@ final class ShellModel {
 
 struct ShellView: View {
     @Environment(ShellModel.self) private var model
+    @Environment(VoiceInputManager.self) private var voiceInput
     @State private var draft = ""
     @State private var confirmMode: Mode?
 
@@ -84,7 +88,13 @@ struct ShellView: View {
             inputBar
         }
         .background(Theme.walnut)
-        .onAppear { model.start() }
+        .onAppear {
+            model.start()
+            let shell = model // 인스턴스 직접 캡처 — 뷰 구조체 탈출 캡처 회피
+            voiceInput.onTransmit = { shell.send($0) }
+            voiceInput.onListeningStart = { shell.voiceOutput.interrupt() }
+            Task { await voiceInput.prepare() }
+        }
         .confirmationDialog("모드를 전환할까요?", isPresented: Binding(get: { confirmMode != nil }, set: { if !$0 { confirmMode = nil } }), titleVisibility: .visible) {
             Button("전환") { if let m = confirmMode { model.requestMode(m) }; confirmMode = nil }
             Button("취소", role: .cancel) { confirmMode = nil }
@@ -104,7 +114,34 @@ struct ShellView: View {
                         .foregroundStyle(model.mode == m ? Theme.walnut : Theme.dim)
                 }.buttonStyle(.plain)
             }
+            voiceStatus
+            voiceToggle
         }.padding(10)
+    }
+
+    /// §12 1단계 상태 인디케이터 — 핫키 청취/인식 처리 중 표시
+    private var voiceStatus: some View {
+        Group {
+            switch voiceInput.state {
+            case .listening: Text("🔴 listening")
+            case .processing: Text("🟡 processing")
+            case .idle: EmptyView()
+            }
+        }
+        .font(.system(size: 10, design: .monospaced))
+        .foregroundStyle(Theme.ivory)
+    }
+
+    private var voiceToggle: some View {
+        Button {
+            voiceInput.setEnabled(!voiceInput.enabled)
+        } label: {
+            Image(systemName: voiceInput.enabled ? "mic.fill" : "mic.slash")
+                .font(.system(size: 13))
+                .foregroundStyle(voiceInput.enabled ? Theme.gold : Theme.dim)
+        }
+        .buttonStyle(.plain)
+        .help(voiceInput.statusNote ?? (voiceInput.enabled ? "Push-to-Talk: Cmd+Shift+Space 길게 눌러 말하기" : "음성 입력 켜기"))
     }
 
     private var inputBar: some View {
