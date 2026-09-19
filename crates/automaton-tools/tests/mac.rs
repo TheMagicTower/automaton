@@ -1,5 +1,5 @@
 use automaton_policy::Category;
-use automaton_tools::{AxRead, CaptureScreen, InputClick, InputType, Tool};
+use automaton_tools::{AxListElements, AxRead, CaptureScreen, InputClick, InputClickElement, InputType, Tool};
 use serde_json::json;
 
 #[test]
@@ -60,4 +60,66 @@ fn captures_screen_to_file() {
 fn reads_frontmost_summary() {
     let out = AxRead.execute(&json!({})).unwrap();
     assert!(out.contains("app"));
+}
+
+#[test]
+fn ax_list_elements_declares_read() {
+    assert_eq!(AxListElements.category(&json!({})), Category::Read);
+}
+
+#[test]
+fn ax_tree_parses_nested_element_json() {
+    let raw = r#"{"role":"AXWindow","title":"기본","x":0,"y":0,"w":800,"h":600,"children":[{"role":"AXButton","title":"확인","x":10,"y":20,"w":80,"h":30,"truncated":true,"children":[]}]}"#;
+    let tree = AxListElements.parse_tree(raw).unwrap();
+    assert_eq!(tree.role, "AXWindow");
+    assert_eq!(tree.x, Some(0.0));
+    let btn = &tree.children.as_ref().unwrap()[0];
+    assert_eq!((btn.role.as_str(), btn.title.as_str()), ("AXButton", "확인"));
+    assert_eq!(btn.x, Some(10.0));
+    assert_eq!(btn.truncated, Some(true));
+}
+
+#[test]
+fn input_click_element_classifies_by_target_f04() {
+    assert_eq!(InputClickElement.category(&json!({"name":"확인","target":"button '확인'"})), Category::Input);
+    assert_eq!(InputClickElement.category(&json!({"name":"확인"})), Category::External); // target 누락
+    assert_eq!(InputClickElement.category(&json!({"role":"AXButton","target":"   "})), Category::External); // 빈 target
+    assert_eq!(InputClickElement.category(&json!({"name":"x","target":7})), Category::External); // 비문자열 target
+}
+
+#[test]
+fn input_click_element_requires_search_operand() {
+    // name/role 둘 다 없으면 정책 target이 있어도 실행 불가 — osascript 실행 전에 검증
+    assert!(InputClickElement.execute(&json!({"target":"button"})).is_err());
+}
+
+#[test]
+fn ax_hit_center_is_bbox_middle() {
+    let hit = InputClickElement.parse_hit(r#"{"role":"AXButton","title":"OK","x":10,"y":20,"w":100,"h":50}"#).unwrap();
+    assert_eq!(hit.center(), Some((60.0, 45.0)));
+    let bare = InputClickElement.parse_hit(r#"{"role":"AXCheckBox","x":5,"y":7}"#).unwrap();
+    assert_eq!(bare.center(), Some((5.0, 7.0))); // 크기 없으면 좌상단 그대로
+    let no_pos = InputClickElement.parse_hit(r#"{"role":"AXButton"}"#).unwrap();
+    assert_eq!(no_pos.center(), None); // 좌표 없으면 클릭 불가
+}
+
+#[test]
+fn mac_set_registers_element_tools() {
+    let r = automaton_tools::Registry::mac_set();
+    assert!(r.get("ax.list_elements").is_some());
+    assert!(r.get("input.click_element").is_some());
+}
+
+#[test]
+#[ignore = "접근성 권한 필요"]
+fn lists_frontmost_element_tree() {
+    let out = AxListElements.execute(&json!({})).unwrap();
+    assert!(out.contains("\"role\""));
+}
+
+#[test]
+#[ignore = "접근성·입력 이벤트 권한 필요 — 실제 화면을 클릭함"]
+fn clicks_element_found_by_role() {
+    let out = InputClickElement.execute(&json!({"role":"AXButton","target":"button"})).unwrap();
+    assert!(out.contains("클릭 완료"));
 }

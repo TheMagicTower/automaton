@@ -43,6 +43,21 @@ fn tmp(name: &str) -> std::path::PathBuf {
     p
 }
 
+#[test]
+fn builtin_profiles_resolve_every_tool_in_matching_registry() {
+    // 프로파일이 레지스트리에 없는 툴을 나열하면 build_request에서 조용히 누락된다 — 회귀 가드
+    let code = ModeProfile::builtin(Mode::Code);
+    let reg = Registry::coding_set();
+    for n in &code.tools {
+        assert!(reg.get(n).is_some(), "code 프로파일의 {n}이(가) coding_set에 없음");
+    }
+    let mac = ModeProfile::builtin(Mode::Mac);
+    let mreg = Registry::mac_set();
+    for n in &mac.tools {
+        assert!(mreg.get(n).is_some(), "mac 프로파일의 {n}이(가) mac_set에 없음");
+    }
+}
+
 async fn run(provider: Box<dyn Provider>, gate: Box<dyn ApprovalGate>, user: &str) -> Vec<Event> {
     let mut events = vec![];
     let lp = AgentLoop::new(provider, gate, Engine::builtin(), Registry::coding_set(), Mode::Code);

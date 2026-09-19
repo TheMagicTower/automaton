@@ -38,7 +38,9 @@ impl Registry {
         let mut r = Registry::new();
         r.register(Box::new(CaptureScreen));
         r.register(Box::new(AxRead));
+        r.register(Box::new(AxListElements));
         r.register(Box::new(InputClick));
+        r.register(Box::new(InputClickElement));
         r.register(Box::new(InputType));
         r.register(Box::new(ShellExec));
         r
@@ -47,11 +49,15 @@ impl Registry {
     pub fn coding_set() -> Self {
         let mut r = Registry::new();
         r.register(Box::new(FsRead));
+        r.register(Box::new(FsReadLines));
         r.register(Box::new(FsWrite));
         r.register(Box::new(FsGrep));
         r.register(Box::new(FsDelete));
+        r.register(Box::new(FsMkdir));
+        r.register(Box::new(FsMove));
         r.register(Box::new(ShellExec));
         r.register(Box::new(EditApply));
+        r.register(Box::new(EditReplaceLines));
         r
     }
 }
