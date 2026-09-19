@@ -56,14 +56,18 @@ impl Registry {
     }
 }
 
-/// args에서 정책 Action의 app/target 필드를 추출 (없으면 None)
-pub fn action_context(args: &serde_json::Value) -> (Option<String>, Option<String>) {
-    // 보안 불변식: 실행 피연산자(path, command)를 우선 추출하여
-    // 모델이 주입한 미선언 decoy 'target' 인자가 배너 및 민감필드 검사를 가로채는 우회를 원천 방지
-    let target = args.get("path")
-        .or_else(|| args.get("command"))
-        .or_else(|| args.get("target"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    (args.get("app").and_then(|v| v.as_str()).map(String::from), target)
+/// args에서 정책 Action의 app/target 필드를 도구별 선언 피연산자 기반으로 추출.
+/// 도구별 명시 피연산자만 추출하므로 미선언 decoy 키(decoy path, decoy target 등)나
+/// 타입 혼동(비문자열 키)이 실제 실행 인자를 마스킹하거나 정책 엔진 검사를 가로채는 우회를 원천 방지한다.
+pub fn action_context(tool_name: &str, args: &serde_json::Value) -> (Option<String>, Option<String>) {
+    let app = args.get("app").and_then(|v| v.as_str()).map(String::from);
+    let target = match tool_name {
+        "shell.exec" => args.get("command").and_then(|v| v.as_str()),
+        t if t.starts_with("fs.") || t.starts_with("edit.") => args.get("path").and_then(|v| v.as_str()),
+        t if t.starts_with("input.") => args.get("target").and_then(|v| v.as_str()),
+        _ => args.get("path").and_then(|v| v.as_str())
+            .or_else(|| args.get("command").and_then(|v| v.as_str()))
+            .or_else(|| args.get("target").and_then(|v| v.as_str())),
+    }.map(String::from);
+    (app, target)
 }

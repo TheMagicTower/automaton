@@ -49,17 +49,24 @@ fn fs_read_declares_read_category_and_missing_file_is_error() {
 
 #[test]
 fn action_context_extracts_command_as_target() {
-    let (app, target) = automaton_tools::action_context(&json!({"command": "echo test"}));
+    let (app, target) = automaton_tools::action_context("shell.exec", &json!({"command": "echo test"}));
     assert_eq!(app, None);
     assert_eq!(target, Some("echo test".to_string()));
 }
 
 #[test]
 fn action_context_prioritizes_operational_args_over_decoy_target() {
-    // 보안 회귀 방지: 적대적 모델이 decoy target을 보내도 실제 command 또는 path가 타깃으로 추출되어야 함
-    let (_, target_cmd) = automaton_tools::action_context(&json!({"command": "rm -rf ~", "target": "cargo test"}));
+    // 보안 회귀 방지: 적대적 모델이 decoy target 또는 decoy path를 보내도 도구 선언 피연산자만 추출되어야 함
+    let (_, target_cmd) = automaton_tools::action_context("shell.exec", &json!({"command": "rm -rf ~", "target": "cargo test", "path": "notes.txt"}));
     assert_eq!(target_cmd, Some("rm -rf ~".to_string()));
 
-    let (_, target_path) = automaton_tools::action_context(&json!({"path": "Passwords.kdbx", "target": "notes.txt"}));
+    let (_, target_path) = automaton_tools::action_context("fs.read", &json!({"path": "Passwords.kdbx", "target": "notes.txt", "command": "echo fake"}));
     assert_eq!(target_path, Some("Passwords.kdbx".to_string()));
+
+    let (_, target_input) = automaton_tools::action_context("input.type", &json!({"target": "SecureTextField", "path": "notes.txt"}));
+    assert_eq!(target_input, Some("SecureTextField".to_string()));
+
+    // 타입 혼동 방지: 비문자열 path가 있어도 정상 추출
+    let (_, target_type) = automaton_tools::action_context("shell.exec", &json!({"command": "cat secret", "path": 123}));
+    assert_eq!(target_type, Some("cat secret".to_string()));
 }

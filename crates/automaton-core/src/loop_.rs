@@ -96,7 +96,7 @@ impl<P: Provider, G: ApprovalGate> AgentLoop<P, G> {
             history.push(Message { role: "tool".into(), content: format!("[{}] 오류: {msg}", call.name) });
             return Ok(());
         };
-        let (app, target) = action_context(&call.args);
+        let (app, target) = action_context(&call.name, &call.args);
         let action = Action { tool: call.name.clone(), category: tool.category(&call.args), app, target: target.clone() };
         let verdict = self.policy.evaluate(&action, self.profile.mode);
         let info = ActionInfo { tool: call.name.clone(), target: target.unwrap_or_default(), risk: summary_of(&action) };

@@ -164,3 +164,19 @@ async fn decoy_target_does_not_bypass_sensitive_path_deny() {
     assert!(ev.iter().any(|e| matches!(e, Event::ToolResult { ok: false, .. })));
     assert!(ev.iter().any(|e| matches!(e, Event::ToolResult { summary, .. } if summary.contains("민감 입력 필드"))));
 }
+
+#[tokio::test]
+async fn shell_exec_with_decoy_path_does_not_mask_sensitive_command() {
+    // 적대적 모델이 shell.exec에 decoy path: "notes.txt"를 보내도 실제 command 안의 Password가 검사되어 Deny되어야 함
+    let p = Scripted {
+        turns: Mutex::new(vec![
+            vec![StreamItem::ToolCall(ToolCall { name: "shell.exec".into(), args: json!({"command": "cat ~/Passwords.kdbx", "path": "notes.txt"}) })],
+            vec![StreamItem::Delta("거부됨 확인".into())],
+        ]),
+        call: Mutex::new(0),
+    };
+    let ev = run(Box::new(p), Box::new(AutoGate(ApprovalOutcome::Approve)), "비밀번호 출력해줘").await;
+    assert!(!ev.iter().any(|e| matches!(e, Event::ApprovalRequested { .. })));
+    assert!(ev.iter().any(|e| matches!(e, Event::ToolResult { ok: false, .. })));
+    assert!(ev.iter().any(|e| matches!(e, Event::ToolResult { summary, .. } if summary.contains("민감 입력 필드"))));
+}
