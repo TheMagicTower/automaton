@@ -48,9 +48,12 @@ pub struct AgentLoop<P: Provider, G: ApprovalGate> {
 }
 
 impl<P: Provider, G: ApprovalGate> AgentLoop<P, G> {
-    pub fn new(provider: P, gate: G, policy: Engine, registry: Registry, mode: Mode) -> Self {
-        let profile = ModeProfile::builtin(mode);
+    pub fn with_profile(provider: P, gate: G, policy: Engine, registry: Registry, profile: ModeProfile) -> Self {
         AgentLoop { provider, gate, policy, registry, profile, approval_seq: AtomicU32::new(1) }
+    }
+
+    pub fn new(provider: P, gate: G, policy: Engine, registry: Registry, mode: Mode) -> Self {
+        Self::with_profile(provider, gate, policy, registry, ModeProfile::builtin(mode))
     }
 
     pub async fn run_turn(&self, session: &str, history: &mut Vec<Message>, user: String, emit: &mut (dyn FnMut(Event) + Send)) -> Result<(), CoreError> {
