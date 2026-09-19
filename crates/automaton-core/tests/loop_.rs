@@ -4,6 +4,7 @@ use automaton_proto::{ActionInfo, Event, Mode};
 use automaton_tools::Registry;
 use serde_json::json;
 use parking_lot::Mutex;
+use futures_util::StreamExt;
 
 struct Scripted { turns: Mutex<Vec<Vec<StreamItem>>>, call: Mutex<usize> }
 #[async_trait::async_trait]
@@ -17,10 +18,23 @@ impl Provider for Scripted {
     }
 }
 
+/// complete_stream 오버라이드가 Box<dyn>/&dyn 경로에서도 발동하는지 —
+/// 전달 구현이 complete()만 위임하면 기본 버퍼링이 역행해 데몬 스트리밍이 죽는다 (실측 스모크 결함 회귀 가드).
+struct Streaming { items: Vec<StreamItem> }
+#[async_trait::async_trait]
+impl Provider for Streaming {
+    async fn complete(&self, _req: CompletionRequest) -> Result<Vec<StreamItem>, CoreError> {
+        panic!("complete_stream 오버라이드가 있으면 complete()는 불리지 않아야 함")
+    }
+    async fn complete_stream(&self, _req: CompletionRequest) -> Result<ProviderStream, CoreError> {
+        Ok(futures_util::stream::iter(self.items.clone().into_iter().map(Ok)).boxed())
+    }
+}
+
 struct AutoGate(ApprovalOutcome);
 #[async_trait::async_trait]
 impl ApprovalGate for AutoGate {
-    async fn decide(&self, _a: ActionInfo) -> ApprovalOutcome { self.0.clone() }
+    async fn decide(&self, _session: &str, _a: ActionInfo) -> ApprovalOutcome { self.0.clone() }
 }
 
 fn tmp(name: &str) -> std::path::PathBuf {
@@ -55,6 +69,14 @@ async fn usage_item_emits_usage_event_and_not_history() {
     ]]), call: Mutex::new(0) };
     let evs = run(Box::new(p), Box::new(AutoGate(ApprovalOutcome::Approve)), "질문").await;
     assert!(evs.iter().any(|e| matches!(e, Event::Usage { usage, .. } if usage.total_tokens == 10)));
+}
+
+#[tokio::test]
+async fn provider_stream_override_survives_dyn_forwarding() {
+    let p = Streaming { items: vec![StreamItem::Delta("청크".into())] };
+    // run()은 데몬과 동일하게 Box<dyn Provider>로 루프 구동 — 전달 누락 시 panic으로 실패
+    let evs = run(Box::new(p), Box::new(AutoGate(ApprovalOutcome::Approve)), "질문").await;
+    assert!(evs.iter().any(|e| matches!(e, Event::StreamDelta { delta, .. } if delta == "청크")));
 }
 
 #[tokio::test]

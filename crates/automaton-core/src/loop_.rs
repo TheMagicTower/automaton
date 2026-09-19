@@ -12,31 +12,35 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub enum ApprovalOutcome { Approve, Deny }
 
 /// ASK 판정 시 승인을 구하는 계약 — 데몬은 JSON-RPC 승인 배너로, 테스트는 자동응답으로 구현.
+/// session 식별자 포함: 승인 대기열 키는 "{session}:{tool}" — 세션 간 승인 혼동 방지 (F-05).
 #[async_trait::async_trait]
 pub trait ApprovalGate: Send + Sync {
-    async fn decide(&self, action: ActionInfo) -> ApprovalOutcome;
+    async fn decide(&self, session: &str, action: ActionInfo) -> ApprovalOutcome;
 }
 
 // Box<dyn ...>로 감싼 트레이트 객체가 그대로 트레이트를 만족하도록 전달 구현 (테스트·데몬에서 Box 사용)
 #[async_trait::async_trait]
 impl<P: Provider + ?Sized> Provider for Box<P> {
     async fn complete(&self, req: CompletionRequest) -> Result<Vec<StreamItem>, CoreError> { (**self).complete(req).await }
+    // complete_stream도 위임 필수 — 기본 구현은 self.complete() 버퍼링이라 dyn 뒤 오버라이드에 못 닿음 (실측 스모크 결함)
+    async fn complete_stream(&self, req: CompletionRequest) -> Result<ProviderStream, CoreError> { (**self).complete_stream(req).await }
 }
 
 #[async_trait::async_trait]
 impl<G: ApprovalGate + ?Sized> ApprovalGate for Box<G> {
-    async fn decide(&self, action: ActionInfo) -> ApprovalOutcome { (**self).decide(action).await }
+    async fn decide(&self, session: &str, action: ActionInfo) -> ApprovalOutcome { (**self).decide(session, action).await }
 }
 
 #[async_trait::async_trait]
 impl<G: ApprovalGate + ?Sized> ApprovalGate for std::sync::Arc<G> {
-    async fn decide(&self, action: ActionInfo) -> ApprovalOutcome { (**self).decide(action).await }
+    async fn decide(&self, session: &str, action: ActionInfo) -> ApprovalOutcome { (**self).decide(session, action).await }
 }
 
 // 참조(&dyn) 전달 구현 — 데몬이 Box<dyn Provider>를 참조로 넘길 때 필요 (Chunk 4 리뷰 반영)
 #[async_trait::async_trait]
 impl<P: Provider + ?Sized> Provider for &P {
     async fn complete(&self, req: CompletionRequest) -> Result<Vec<StreamItem>, CoreError> { (**self).complete(req).await }
+    async fn complete_stream(&self, req: CompletionRequest) -> Result<ProviderStream, CoreError> { (**self).complete_stream(req).await }
 }
 
 pub struct AgentLoop<P: Provider, G: ApprovalGate> {
@@ -111,7 +115,7 @@ impl<P: Provider, G: ApprovalGate> AgentLoop<P, G> {
             Verdict::Ask { reason } => {
                 let id = self.approval_seq.fetch_add(1, Ordering::SeqCst).to_string();
                 emit(Event::ApprovalRequested { session: session.into(), approval: id, action: ActionInfo { risk: reason.clone(), ..info.clone() }, hint: None });
-                let outcome = self.gate.decide(info).await;
+                let outcome = self.gate.decide(session, info).await;
                 match outcome {
                     ApprovalOutcome::Approve => self.execute_and_record(session, tool, call, history, emit),
                     ApprovalOutcome::Deny => {
