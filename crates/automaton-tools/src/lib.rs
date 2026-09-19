@@ -58,6 +58,10 @@ impl Registry {
 
 /// args에서 정책 Action의 app/target 필드를 추출 (없으면 None)
 pub fn action_context(args: &serde_json::Value) -> (Option<String>, Option<String>) {
-    (args.get("app").and_then(|v| v.as_str()).map(String::from),
-     args.get("target").and_then(|v| v.as_str()).or_else(|| args.get("path").and_then(|v| v.as_str())).map(String::from))
+    let target = args.get("target")
+        .or_else(|| args.get("path"))
+        .or_else(|| args.get("command"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    (args.get("app").and_then(|v| v.as_str()).map(String::from), target)
 }

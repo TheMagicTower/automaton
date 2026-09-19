@@ -71,7 +71,7 @@ impl Daemon {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
+            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
         }
         eprintln!("automatond listening at {}", socket.display());
         loop {
@@ -114,9 +114,14 @@ impl Daemon {
                             let approved = decision == Decision::Approve;
                             let _ = self.apprentice.note_decision(&session, &ActionInfo { tool: tool.clone(), target: target.clone(), risk: String::new() }, "ask", if approved { "approve" } else { "deny" });
                             if always && approved { // 거절+항상허용 조합은 Allow 발행 금지 (프로토콜 수비, 리뷰 반영)
-                                let mut e = self.engine.lock();
-                                e.grant_always(Rule { name: format!("granted-{approval}-{tool}"), tool: Some(tool.clone()), app: None, category: None, verdict: VerdictTemplate::Allow });
-                                let _ = e.save(&self.paths.policy());
+                                if tool == "shell.exec" {
+                                    // 보안 불변식: shell.exec에 대한 툴 단위 무제한 '항상 허용'은 금지 (임의 셸 명령 실행 위험 차단)
+                                    eprintln!("보안 경고: shell.exec는 영구 '항상 허용' 규칙으로 등록 불가 (매회 승인 필요)");
+                                } else {
+                                    let mut e = self.engine.lock();
+                                    e.grant_always(Rule { name: format!("granted-{approval}-{tool}"), tool: Some(tool.clone()), app: None, category: None, verdict: VerdictTemplate::Allow });
+                                    let _ = e.save(&self.paths.policy());
+                                }
                             }
                             if let Some(tx) = self.gate.pending.lock().remove(&tool) {
                                 let _ = tx.send(decision);

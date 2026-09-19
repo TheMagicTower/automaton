@@ -14,23 +14,23 @@ use serde_json::Value;
 pub struct CaptureScreen;
 impl Tool for CaptureScreen {
     fn name(&self) -> &'static str { "capture.screen" }
-    fn description(&self) -> &'static str { "화면을 캡처해 png 파일 경로를 반환" }
+    fn description(&self) -> &'static str { "화면을 캡처해 임시 png 파일 경로를 반환" }
     fn parameters_schema(&self) -> Value {
-        serde_json::json!({"type":"object","properties":{"path":{"type":"string"}}})
+        serde_json::json!({"type":"object","properties":{}})
     }
     fn category(&self, _args: &Value) -> Category { Category::Read }
-    fn execute(&self, args: &Value) -> Result<String, ToolError> {
-        let path = args.get("path").and_then(|v| v.as_str()).map(String::from)
-            .unwrap_or_else(|| std::env::temp_dir().join(format!("automaton-capture-{}.png", std::process::id())).to_string_lossy().into());
-        if path.starts_with('-') {
-            return Err(ToolError::Message("경로는 '-'로 시작할 수 없습니다 (옵션 주입 방지)".into()));
-        }
-        let out = std::process::Command::new("screencapture").arg("-x").arg(&path).output()
+    fn execute(&self, _args: &Value) -> Result<String, ToolError> {
+        // 임의 파일 덮어쓰기 원천 방지: 클라이언트 지정 경로를 허용하지 않고 항상 데몬 관리 임시 파일에만 기록
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!("automaton-capture-{}-{seq}.png", std::process::id()));
+        let path_str = path.to_string_lossy().to_string();
+        let out = std::process::Command::new("screencapture").arg("-x").arg(&path_str).output()
             .map_err(|e| ToolError::Message(format!("screencapture 실행 실패: {e}")))?;
         if !out.status.success() {
             return Err(ToolError::Message(format!("캡처 실패(exit {}): 스크린 레코딩 권한 확인 필요", out.status)));
         }
-        Ok(path)
+        Ok(path_str)
     }
 }
 

@@ -49,9 +49,14 @@ fn sensitive_targets_are_denied_regardless_of_rules() {
 #[test]
 fn sensitive_targets_denied_case_insensitive() {
     let e = Engine::builtin();
-    for target in ["password", "PASSWORD", "user_password_field", "my_passcode", "pin_code", "secret_token"] {
+    for target in ["password", "PASSWORD", "user_password_field", "passwd", "my_passphrase", "my_passcode", "secret_token", "user_credential", "api_key", "my-otp", "card_cvv", "user_pin"] {
         let a = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.apple.finder".into()), target: Some(target.into()) };
-        assert!(matches!(e.evaluate(&a, Mode::Mac), Verdict::Deny { .. }), "target: {target}");
+        assert!(matches!(e.evaluate(&a, Mode::Mac), Verdict::Deny { .. }), "should deny target: {target}");
+    }
+    // pin/otp 등이 단어의 일부로 포함된 일반 단어(typing, shipping, spinner)는 Deny되지 않아야 함 (위양성 방지)
+    for benign in ["typing_area", "shipping_address", "spinner_control"] {
+        let a = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.apple.finder".into()), target: Some(benign.into()) };
+        assert!(matches!(e.evaluate(&a, Mode::Mac), Verdict::Ask { .. }), "should not deny benign: {benign}");
     }
 }
 

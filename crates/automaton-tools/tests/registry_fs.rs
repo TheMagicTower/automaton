@@ -46,3 +46,10 @@ fn fs_read_declares_read_category_and_missing_file_is_error() {
     assert_eq!(FsRead.category(&json!({})), automaton_policy::Category::Read);
     assert!(FsRead.execute(&json!({"path": tmp("없는파일")})).is_err());
 }
+
+#[test]
+fn action_context_extracts_command_as_target() {
+    let (app, target) = automaton_tools::action_context(&json!({"command": "echo test"}));
+    assert_eq!(app, None);
+    assert_eq!(target, Some("echo test".to_string()));
+}

@@ -91,10 +91,21 @@ impl Engine {
     /// 5) 나머지 규칙 첫 매치
     /// 6) 카테고리×모드 기본값
     pub fn evaluate(&self, a: &Action, mode: Mode) -> Verdict {
-        // 1. 민감 입력 필드 — 하드 거부 (대소문자 무관, 하드코딩된 민감 키워드 검사)
+        // 1. 민감 입력 필드 — 하드 거부 (대소문자 무관, 민감 키워드 검사)
         if let Some(t) = &a.target {
             let lower = t.to_lowercase();
-            if lower.contains("securetextfield") || lower.contains("password") || lower.contains("passcode") || lower.contains("secret") || lower.contains("pin") {
+            let is_sensitive = lower.contains("securetextfield")
+                || lower.contains("password")
+                || lower.contains("passwd")
+                || lower.contains("passphrase")
+                || lower.contains("passcode")
+                || lower.contains("secret")
+                || lower.contains("token")
+                || lower.contains("credential")
+                || lower.contains("apikey")
+                || lower.contains("api_key")
+                || lower.split(|c: char| !c.is_alphanumeric()).any(|w| matches!(w, "pin" | "otp" | "cvv"));
+            if is_sensitive {
                 return Verdict::Deny { reason: format!("민감 입력 필드: {t}") };
             }
         }

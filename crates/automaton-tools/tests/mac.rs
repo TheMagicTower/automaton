@@ -17,9 +17,8 @@ fn input_tools_require_args() {
 }
 
 #[test]
-fn capture_screen_rejects_flag_injection_paths() {
-    assert!(CaptureScreen.execute(&json!({"path": "-c"})).is_err());
-    assert!(CaptureScreen.execute(&json!({"path": "-P"})).is_err());
+fn capture_screen_schema_allows_no_path_injection() {
+    assert_eq!(CaptureScreen.parameters_schema(), json!({"type":"object","properties":{}}));
 }
 
 #[test]
