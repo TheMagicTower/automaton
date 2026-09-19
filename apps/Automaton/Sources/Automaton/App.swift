@@ -1,7 +1,23 @@
 import AppKit
 import SwiftUI
 
+/// SPM 실행 파일용 진입점 — 번들 없이 NSApplication을 수동 구성한다.
+/// @main + NSApplicationDelegate는 NSApplicationMain을 호출하는데,
+/// SPM 실행 파일에는 Info.plist/번들 컨텍스트가 없어 메뉴바 등록이 실패한다.
+/// 수동 런루프 + accessory 정책이 SPM 메뉴바 앱의 표준 패턴이다.
 @main
+enum AutomatonEntry {
+    static func main() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory) // 메뉴바 전용, Dock 아이콘 없음
+
+        let delegate = AutomatonAppDelegate()
+        app.delegate = delegate
+
+        app.run()
+    }
+}
+
 @MainActor
 final class AutomatonAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBar = MenuBarController()
@@ -19,36 +35,77 @@ final class AutomatonAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-// MARK: - ShellModel (기존 로직 유지)
+// MARK: - ShellModel
 
 @Observable
 @MainActor
 final class ShellModel {
     var mode: Mode = .chat
-    var stream: [String] = []
+    var stream: [ChatEntry] = []
+    var sessions: [SessionRecord] = []
     var pendingApproval: (id: String, action: ActionInfo, hint: Hint?)?
     var draftSuggestions: [String] = []
+    var isThinking = false
     var connected = false
     var memoryCount: Int = 0
     let voiceOutput = VoiceOutputManager()
     private let conn = DaemonConnection()
-    private var session = "shell-\(UInt64(Date().timeIntervalSince1970))"
+    private var session: String {
+        didSet { UserDefaults.standard.set(session, forKey: "automaton.session") }
+    }
     private var started = false
+    /// history_get 응답 대기 — 데몬은 이력을 "▸ " 접두 텍스트 blob 한 덩어리로 보낸다
+    private var historyPending = false
+    private var persistTask: Task<Void, Never>?
+
+    var currentSessionID: String { session }
+
+    init() {
+        // 저장된 세션 재사용 — 재시작해도 대화 맥락 유지
+        let saved = UserDefaults.standard.string(forKey: "automaton.session")
+        self.session = saved ?? "shell-\(UInt64(Date().timeIntervalSince1970))"
+        // 세션 목록 복원 — 현재 세션 캐시를 즉시 표시(데몬 history 도착 시 대체)
+        self.sessions = SessionStore.load()
+        if let rec = sessions.first(where: { $0.id == session }) {
+            self.stream = rec.entries
+        }
+    }
 
     /// 새 세션 — 기존 대화 스트림 클리어 + 새 세션 ID로 재연결
     func newSession() {
+        flushSessions()
+        session = "shell-\(UInt64(Date().timeIntervalSince1970))"
         stream = []
         pendingApproval = nil
         draftSuggestions = []
-        session = "shell-\(UInt64(Date().timeIntervalSince1970))"
+        isThinking = false
+        historyPending = false
         Task {
             await conn.sendRequest(method: "session_create", params: ["id": session])
         }
     }
 
+    /// 세션 전환 — 캐시된 기록 즉시 표시 후 데몬 history로 대체.
+    /// session_create 미전송: 기존 세션의 모드를 Chat으로 덮어쓰는 부수효과 방지
+    /// (데몬은 미등록 세션도 기본 Chat으로 실행 가능).
+    func switchSession(_ id: String) {
+        guard id != session else { return }
+        flushSessions()
+        session = id
+        stream = sessions.first(where: { $0.id == id })?.entries ?? []
+        pendingApproval = nil
+        draftSuggestions = []
+        isThinking = false
+        historyPending = true
+        Task {
+            await conn.sendRequest(method: "history_get", params: ["session": session, "limit": 50])
+        }
+    }
+
     /// 메모리 조회 — 에이전트가 알고 있는 사용자 정보 표시
     func queryMemory() {
-        stream.append("\n🧠 기억 조회 중...")
+        appendEntry(.tool, "⚙ 기억 조회 중…")
+        historyPending = false // message_send 전송 = 라이브 턴 시작 — 대기 중 history 오인 방지 (send()와 동일 계약)
         Task {
             await conn.sendRequest(method: "message_send", params: [
                 "session": session,
@@ -61,9 +118,12 @@ final class ShellModel {
         guard !started else { return }
         started = true
         Task {
-            let stream = await conn.events()
+            let events = await conn.events()
             await conn.sendRequest(method: "session_create", params: ["id": session])
-            for await ev in stream {
+            // 이전 대화 이력 로딩 — 저장된 세션이면 최근 메시지 표시
+            historyPending = true
+            await conn.sendRequest(method: "history_get", params: ["session": session, "limit": 50])
+            for await ev in events {
                 connected = true
                 apply(ev)
             }
@@ -72,21 +132,76 @@ final class ShellModel {
     }
 
     private func apply(_ ev: ShellEvent) {
+        // 타 세션 이벤트 무시 — 전환 직후 구세션 스트림이 새 뷰에 섞이는 것 방지
+        if let s = Self.sessionOf(ev), s != session { return }
         switch ev {
-        case .streamDelta(_, let delta): stream.append(delta); voiceOutput.append(delta: delta)
-        case .toolStarted(_, let tool, _): stream.append("\n⚙ \(tool)"); voiceOutput.flush()
-        case .toolResult(_, let tool, let ok, let summary): stream.append(ok ? " ✓ \(tool)" : " ✗ \(tool): \(summary)")
-        case .approvalRequested(_, let id, let action, let hint): pendingApproval = (id, action, hint); draftSuggestions = []
-        case .draftSuggestions(_, let suggestions): draftSuggestions = suggestions
-        case .modeChanged(_, let mode): self.mode = mode
-        case .error(_, let message): stream.append("\n⚠ \(message)")
+        case .streamDelta(_, let delta):
+            isThinking = false
+            if historyPending {
+                // history_get 응답 = 구형 텍스트 blob → 구조화 변환해 캐시 대체.
+                // 복원 이력은 TTS 발화 대상 아님(기존 startup 낭독 결함 제거).
+                historyPending = false
+                stream = ChatEntry.parseLegacy(delta)
+                schedulePersist()
+            } else {
+                appendDelta(delta)
+            }
+            voiceOutput.append(delta: delta)
+        case .toolStarted(_, let tool, _):
+            appendEntry(.tool, "⚙ \(tool)")
+            voiceOutput.flush()
+        case .toolResult(_, let tool, let ok, let summary):
+            appendEntry(.tool, ok ? "✓ \(tool)" : "✗ \(tool): \(summary)")
+        case .approvalRequested(_, let id, let action, let hint):
+            pendingApproval = (id, action, hint)
+            draftSuggestions = []
+        case .draftSuggestions(_, let suggestions):
+            draftSuggestions = suggestions
+        case .modeChanged(_, let mode):
+            self.mode = mode
+        case .error(_, let message):
+            isThinking = false
+            appendEntry(.error, message)
         }
     }
 
+    private static func sessionOf(_ ev: ShellEvent) -> String? {
+        switch ev {
+        case .streamDelta(let s, _), .toolStarted(let s, _, _), .toolResult(let s, _, _, _),
+             .approvalRequested(let s, _, _, _), .draftSuggestions(let s, _), .modeChanged(let s, _):
+            return s
+        case .error(let s, _):
+            return s
+        }
+    }
+
+    /// 스트리밍 델타 — 마지막 에이전트 엔트리에 병합(토큰마다 애니메이션 없음)
+    private func appendDelta(_ delta: String) {
+        if let last = stream.last, last.role == .agent {
+            stream[stream.count - 1].content += delta
+        } else {
+            stream.append(ChatEntry(role: .agent, content: delta))
+        }
+        schedulePersist()
+    }
+
+    /// 신규 엔트리 — 부드러운 슬라이드업 트랜지션으로 등장
+    private func appendEntry(_ role: UserRole, _ content: String) {
+        let entry = ChatEntry(role: role, content: content)
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+            stream.append(entry)
+        }
+        schedulePersist()
+    }
+
     func send(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         voiceOutput.interrupt()
-        stream.append("\n▸ \(text)")
-        Task { await conn.sendRequest(method: "message_send", params: ["session": session, "text": text]) }
+        isThinking = true
+        historyPending = false // 대기 중 history가 사용자 메시지 직후 델타를 blob으로 오인 방지
+        appendEntry(.user, trimmed)
+        Task { await conn.sendRequest(method: "message_send", params: ["session": session, "text": trimmed]) }
     }
 
     func requestMode(_ to: Mode) {
@@ -98,28 +213,72 @@ final class ShellModel {
         Task { await conn.sendRequest(method: "approval_respond", params: ["session": session, "approval": p.id, "decision": approve ? "approve" : "deny", "always": always]) }
         pendingApproval = nil
     }
+
+    // MARK: - 세션 영속화 (UserDefaults)
+
+    /// 토큰 단위 저장 부하 방지 — 변경 후 0.4초 디바운스 저장
+    private func schedulePersist() {
+        persistTask?.cancel()
+        persistTask = Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            persistSessions()
+        }
+    }
+
+    /// 즉시 저장 — 종료/세션 전환 직전 호출
+    func flushSessions() {
+        persistTask?.cancel()
+        persistTask = nil
+        persistSessions()
+    }
+
+    private func persistSessions() {
+        var recs = sessions.filter { $0.id != session }
+        if !stream.isEmpty {
+            var entries = stream
+            if entries.count > 200 { entries.removeFirst(entries.count - 200) } // 세션당 대화 캐시 상한
+            recs.append(SessionRecord(id: session, entries: entries, updatedAt: Date()))
+        }
+        recs.sort { $0.updatedAt > $1.updatedAt }
+        if recs.count > 20 { recs.removeLast(recs.count - 20) } // 보관 세션 수 상한
+        sessions = recs
+        SessionStore.save(recs)
+    }
 }
+
+// MARK: - ShellView
 
 struct ShellView: View {
     @Environment(ShellModel.self) private var model
     @Environment(VoiceInputManager.self) private var voiceInput
+    /// 창 모드에서만 세션 사이드바 표시 — 팝오버(400pt)에는 폭이 부족
+    private let showSidebar: Bool
     @State private var draft = ""
     @State private var confirmMode: Mode?
 
+    init(showSidebar: Bool = false) {
+        self.showSidebar = showSidebar
+    }
+
+    private let bottomID = "bottom"
+
     var body: some View {
-        VStack(spacing: 0) {
-            modeBar
-            Divider().overlay(Theme.brass.opacity(0.4))
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(model.stream.joined()).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.ivory).frame(maxWidth: .infinity, alignment: .leading).id("bottom")
-                }.onChange(of: model.stream.count) { proxy.scrollTo("bottom") }
+        HStack(spacing: 0) {
+            if showSidebar {
+                SessionSidebar()
+                Divider().overlay(Theme.brass.opacity(0.4))
             }
-            if let p = model.pendingApproval {
-                ApprovalBanner(action: p.action, hint: p.hint) { ok, always in model.respond(approve: ok, always: always) }
-                if !model.draftSuggestions.isEmpty { draftChips }
+            VStack(spacing: 0) {
+                modeBar
+                Divider().overlay(Theme.brass.opacity(0.4))
+                transcript
+                if let p = model.pendingApproval {
+                    ApprovalBanner(action: p.action, hint: p.hint) { ok, always in model.respond(approve: ok, always: always) }
+                    if !model.draftSuggestions.isEmpty { draftChips }
+                }
+                ComposerBar(draft: $draft)
             }
-            inputBar
         }
         .background(Theme.walnut)
         .onAppear {
@@ -133,6 +292,76 @@ struct ShellView: View {
             Button("전환") { if let m = confirmMode { model.requestMode(m) }; confirmMode = nil }
             Button("취소", role: .cancel) { confirmMode = nil }
         }
+    }
+
+    /// 대화 기록 — 역할별 버블 + 새 엔트리 슬라이드업 + 하단 자동 스크롤
+    private var transcript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    if model.stream.isEmpty && !model.isThinking { emptyState }
+                    ForEach(model.stream) { entry in
+                        ChatBubble(entry: entry)
+                            .id(entry.id)
+                            .transition(.asymmetric(
+                                insertion: .move(edge: .bottom).combined(with: .opacity),
+                                removal: .opacity
+                            ))
+                    }
+                    if model.isThinking { thinkingIndicator } // 응답이 올 자리 = 사용자 메시지 바로 아래
+                    Color.clear.frame(height: 1).id(bottomID)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            // 새 메시지(엔트리 추가) + 스트리밍(내용 증가) 모두 하단 유지 — 기존 동작 계승
+            .onChange(of: model.stream.last?.id) { _, _ in proxy.scrollTo(bottomID, anchor: .bottom) }
+            .onChange(of: model.stream.last?.content) { _, _ in proxy.scrollTo(bottomID, anchor: .bottom) }
+            .onChange(of: model.isThinking) { _, on in
+                if on { proxy.scrollTo(bottomID, anchor: .bottom) } // 로딩 시작 시에도 스크롤
+            }
+        }
+    }
+
+    /// 대화 없을 때 안내 — 첫 사용 진입 장벽 완화
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(.system(size: 28))
+                .foregroundStyle(Theme.brass.opacity(0.6))
+            Text("automaton에 메시지를 보내 대화를 시작하세요")
+                .font(.system(size: 12, design: .serif))
+                .foregroundStyle(Theme.dim)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 48)
+        .padding(.bottom, 24)
+    }
+
+    /// 인라인 로딩 — 사용자 메시지 바로 아래, 응답이 올 자리에 표시
+    private var thinkingIndicator: some View {
+        HStack(spacing: 8) {
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+                let t = timeline.date.timeIntervalSinceReferenceDate
+                let angle = (t.truncatingRemainder(dividingBy: 2.0)) / 2.0 * 360.0
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.brass)
+                    .rotationEffect(.degrees(angle))
+            }
+            TimelineView(.animation(minimumInterval: 0.4)) { timeline in
+                let phase = Int(timeline.date.timeIntervalSinceReferenceDate / 0.4) % 3
+                HStack(spacing: 2) {
+                    ForEach(0..<3, id: \.self) { i in
+                        Circle()
+                            .fill(i == phase ? Theme.gold : Theme.dim.opacity(0.3))
+                            .frame(width: 3, height: 3)
+                    }
+                }
+            }
+        }
+        .padding(.top, 2)
     }
 
     private var modeBar: some View {
@@ -193,7 +422,6 @@ struct ShellView: View {
         .help(voiceInput.statusNote ?? (voiceInput.enabled ? "Push-to-Talk: Cmd+Shift+Space 길게 눌러 말하기" : "음성 입력 켜기"))
     }
 
-
     /// §6 3단계 답변 초안 칩 — 클릭하면 입력창에 해당 텍스트가 채워진다(전송은 사용자 몫).
     private var draftChips: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -208,18 +436,6 @@ struct ShellView: View {
                 }
             }.padding(.horizontal, 10).padding(.bottom, 6)
         }
-    }
-
-    @FocusState private var inputFocused: Bool
-
-    private var inputBar: some View {
-        HStack {
-            TextField("명령…", text: $draft).textFieldStyle(.plain).foregroundStyle(Theme.ivory)
-                .focused($inputFocused)
-                .onSubmit { if !draft.isEmpty { model.send(draft); draft = "" } }
-            Button { if !draft.isEmpty { model.send(draft); draft = "" } } label: { Image(systemName: "paperplane.fill").foregroundStyle(Theme.gold) }.buttonStyle(.plain)
-        }.padding(10)
-        .onAppear { inputFocused = true }
     }
 }
 

@@ -4,12 +4,13 @@ import SwiftUI
 /// AppKit 기반 메뉴바 컨트롤러 — NSStatusItem + NSPopover
 /// 프로덕션 메뉴바 앱 표준 방식 + 종료/재기동/새 세션 지원
 @MainActor
-final class MenuBarController: NSObject, NSPopoverDelegate {
+final class MenuBarController: NSObject, NSPopoverDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var model: ShellModel!
     private var voiceInput: VoiceInputManager!
     private var eventMonitor: Any?
+    private var mainWindow: NSWindow?
 
     func setup(model: ShellModel, voiceInput: VoiceInputManager) {
         self.model = model
@@ -21,11 +22,16 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         // NSStatusItem 생성
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "gearshape.fill", accessibilityDescription: "automaton")
+            if let img = NSImage(systemSymbolName: "gearshape.fill", accessibilityDescription: "automaton") {
+                button.image = img
+            } else {
+                button.title = "⚙" // SF Symbol 로드 실패 시 폴백
+            }
             button.action = #selector(statusItemClicked)
             button.target = self
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
+        FileHandle.standardError.write(Data("[automaton] statusItem created: \(statusItem != nil)\n".utf8))
 
         // NSPopover — 내부 클릭 시 닫히지 않음
         popover = NSPopover()
@@ -69,6 +75,10 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     private func showContextMenu(_ sender: NSStatusBarButton) {
         let menu = NSMenu()
 
+        let windowItem = NSMenuItem(title: "창 모드 (⌘Tab)", action: #selector(showWindowAction), keyEquivalent: "w")
+        windowItem.target = self
+        menu.addItem(windowItem)
+
         let newSessionItem = NSMenuItem(title: "새 세션", action: #selector(newSessionAction), keyEquivalent: "n")
         newSessionItem.target = self
         menu.addItem(newSessionItem)
@@ -87,6 +97,53 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         }
     }
 
+    // MARK: - 창 모드 (⌘Tab 전환 지원)
+
+    @objc private func showWindowAction() {
+        if let window = mainWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+
+        // 정규 창 생성 — .regular 정책으로 Cmd+Tab에 표시.
+        // 사이드바(150pt) 폭을 감안해 팝오버보다 넓게 시작.
+        NSApp.setActivationPolicy(.regular)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 700),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "automaton"
+        window.center()
+        window.delegate = self
+
+        let hostingView = NSHostingView(
+            rootView: ShellView(showSidebar: true) // 창 모드 — 세션 사이드바 표시
+                .environment(model)
+                .environment(voiceInput)
+        )
+        window.contentView = hostingView
+
+        // Brass & Glass 배경
+        window.backgroundColor = NSColor(red: 0.10, green: 0.09, blue: 0.07, alpha: 1)
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        mainWindow = window
+    }
+
+    /// 창이 닫히면 메뉴바 전용 모드로 복귀 (Dock·Cmd+Tab에서 제거)
+    func windowWillClose(_ notification: Notification) {
+        mainWindow = nil
+        NSApp.setActivationPolicy(.accessory)
+    }
+
     @objc private func newSessionAction() {
         model.newSession()
         closePopover()
@@ -96,6 +153,9 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     @objc private func quitAction() {
         // 음성 입력 정리
         voiceInput.setEnabled(false)
+
+        // 세션 대화 즉시 저장 — 디바운스 대기분 유실 방지
+        model.flushSessions()
 
         // 상태 아이템 제거
         if let item = statusItem {
