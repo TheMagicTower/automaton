@@ -21,6 +21,12 @@ pub enum Request {
     ModeSwitch { session: String, to: Mode },
     HistoryGet { session: String, limit: usize },
     SessionList,
+    /// 메모리 브라우저 (§7) — 전체 facts 페이지네이션 조회
+    MemoryBrowse { offset: usize, limit: usize },
+    /// 메모리 브라우저 — content와 정확히 일치하는 fact 삭제
+    MemoryDelete { content: String },
+    /// 메모리 브라우저 — 총 fact 수·세션 수·결정 수
+    MemoryStats,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,5 +69,9 @@ pub enum Event {
     /// 완성 1회당 API 사용량 리포트 — writer_loop가 감사 로그에 기록
     Usage { session: String, usage: TokenUsage },
     ModeChanged { session: String, mode: Mode },
+    /// 메모리 브라우저 응답 — facts: 요청한 페이지, total: 전체 fact 수 (페이지네이션용)
+    MemoryData { facts: Vec<String>, total: usize },
+    /// 메모리 통계 응답 — fact·세션·결정 총계
+    MemoryStats { facts: usize, sessions: usize, decisions: usize },
     Error { session: Option<String>, message: String },
 }

@@ -57,3 +57,33 @@ fn usage_event_roundtrip() {
     assert!(json.contains(r#""prompt_tokens":120"#));
     assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), ev);
 }
+
+#[test]
+fn memory_rpc_roundtrip() {
+    // 요청 3종 — memory_browse / memory_delete / memory_stats (unit variant는 params 없이 직렬화)
+    let req = Request::MemoryBrowse { offset: 10, limit: 50 };
+    let json = serde_json::to_string(&req).unwrap();
+    assert!(json.contains(r#""memory_browse""#));
+    assert_eq!(serde_json::from_str::<Request>(&json).unwrap(), req);
+
+    let req = Request::MemoryDelete { content: "caspar는 한국어를 쓴다".into() };
+    let json = serde_json::to_string(&req).unwrap();
+    assert!(json.contains(r#""memory_delete""#));
+    assert_eq!(serde_json::from_str::<Request>(&json).unwrap(), req);
+
+    let req = Request::MemoryStats;
+    let json = serde_json::to_string(&req).unwrap();
+    assert!(json.contains(r#""memory_stats""#));
+    assert_eq!(serde_json::from_str::<Request>(&json).unwrap(), req);
+
+    // 이벤트 — memory_data / memory_stats
+    let ev = Event::MemoryData { facts: vec!["caspar는 한국어를 쓴다".into()], total: 1 };
+    let json = serde_json::to_string(&ev).unwrap();
+    assert!(json.contains(r#""memory_data""#));
+    assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), ev);
+
+    let ev = Event::MemoryStats { facts: 3, sessions: 2, decisions: 1 };
+    let json = serde_json::to_string(&ev).unwrap();
+    assert!(json.contains(r#""memory_stats""#));
+    assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), ev);
+}

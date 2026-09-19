@@ -2,14 +2,15 @@
 //! 감사 로그(§5) + Apprentice 결정 기록·힌트 주입(§6) + 소켓 출력을 단일 책임으로 수행한다.
 
 use automaton_apprentice::Apprentice;
-use automaton_core::{AgentLoop, ApprovalGate, ApprovalOutcome, Provider};
+use automaton_core::{AgentLoop, ApprovalGate, ApprovalOutcome, CompletionRequest, Provider, StreamItem};
 use automaton_memory::MemoryStore;
 use automaton_policy::{Engine, Rule, VerdictTemplate};
 use automaton_proto::{ActionInfo, Decision, Event, Mode, Request};
 use parking_lot::Mutex; // 즉시 unwrap 락 — rs-parking-lot 룰(가드 직접 반환). async 채널은 tokio::sync 유지
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
@@ -40,6 +41,14 @@ pub struct Daemon {
     apprentice: Apprentice,
     store: MemoryStore,
     sessions: Mutex<HashMap<String, Mode>>,
+    /// 세션 요약기 상태 — 마지막 활동 시각 / 마지막 요약이 커버한 메시지 수 / 요약 진행 중 세션
+    last_activity: Mutex<HashMap<String, Instant>>,
+    summarized_len: Mutex<HashMap<String, usize>>,
+    summarizing: Mutex<HashSet<String>>,
+    /// 세션별 '이전 세션 요약' 블록 — 첫 턴에 고정(시스템 프롬프트 캐시 프리픽스 안정성)
+    summary_blocks: Mutex<HashMap<String, String>>,
+    /// 세션 종료 판정 유휴 시간 — 마지막 메시지 후 이 시간 경과 시 요약 (기본 30초, 테스트 단축)
+    pub summary_idle: Duration,
     /// 승인 id → (발행 세션, 툴, 타깃) — 세션 바인딩 검증(F-03) + "항상 허용" 스코프·팬텀 id 차단(§5) + 저널 target 공급(§6)
     pending_asks: Mutex<HashMap<String, (String, String, String)>>,
     /// 데몬 전역 승인 id 발급기 — 루프의 턴 로컬 seq 충돌 방지
@@ -62,7 +71,7 @@ impl Daemon {
         let store = MemoryStore::open(&paths.memory()).expect("메모리 DB 열기 실패");
         let apprentice = Apprentice::open(&paths.memory()).expect("Apprentice DB 열기 실패");
         let gate = Arc::new(SessionGate::new());
-        Daemon { provider, paths, gate, engine: Mutex::new(engine), apprentice, store, sessions: Mutex::new(HashMap::new()), pending_asks: Mutex::new(HashMap::new()), approval_seq: std::sync::atomic::AtomicU64::new(1) }
+        Daemon { provider, paths, gate, engine: Mutex::new(engine), apprentice, store, sessions: Mutex::new(HashMap::new()), last_activity: Mutex::new(HashMap::new()), summarized_len: Mutex::new(HashMap::new()), summarizing: Mutex::new(HashSet::new()), summary_blocks: Mutex::new(HashMap::new()), summary_idle: Duration::from_secs(30), pending_asks: Mutex::new(HashMap::new()), approval_seq: std::sync::atomic::AtomicU64::new(1) }
     }
 
     pub async fn serve(self: Arc<Self>, socket: PathBuf) -> std::io::Result<()> {
@@ -74,6 +83,11 @@ impl Daemon {
             std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
         }
         eprintln!("automatond listening at {}", socket.display());
+        // 세션 요약기 백그라운드 태스크 — 유휴 경과 세션 감지 후 요약 생성 (§7)
+        {
+            let d = self.clone();
+            tokio::spawn(async move { d.session_summarizer().await; });
+        }
         loop {
             let (stream, _) = listener.accept().await?;
             let d = self.clone();
@@ -99,6 +113,11 @@ impl Daemon {
             match req {
                 Request::SessionCreate { id } => {
                     self.sessions.lock().insert(id.clone(), Mode::Chat);
+                    // 새 세션 시작 = 기존 세션 종료 감지 → 유휴 대기 없이 즉시 요약 트리거
+                    for s in self.due_sessions(true).into_iter().filter(|s| *s != id) {
+                        let d = self.clone();
+                        tokio::spawn(async move { d.summarize_session(&s).await; });
+                    }
                     let _ = tx.send(Event::ModeChanged { session: id, mode: Mode::Chat });
                 }
                 Request::ModeSwitch { session, to } => {
@@ -175,6 +194,8 @@ impl Daemon {
                     }
                 }
                 Request::MessageSend { session, text } => {
+                    // 세션 활동 시각 기록 — 요약기의 유휴(종료) 판정 기준 (마지막 메시지 후 N초)
+                    self.last_activity.lock().insert(session.clone(), Instant::now());
                     let d = self.clone();
                     let tx = tx.clone();
                     tokio::spawn(async move { d.run_session(&session, &text, tx).await });
@@ -194,6 +215,23 @@ impl Daemon {
                 Request::SessionList => {
                     // M1 미구현 — 무음 드롭 금지, 명시적 오류 응답
                     let _ = tx.send(Event::Error { session: None, message: "SessionList는 M1 미구현".into() });
+                }
+                Request::MemoryBrowse { offset, limit } => {
+                    let (facts, total) = self.store.facts_page(offset, limit).unwrap_or((Vec::new(), 0));
+                    let _ = tx.send(Event::MemoryData { facts, total });
+                }
+                Request::MemoryDelete { content } => match self.store.delete_fact(&content) {
+                    Ok(n) if n > 0 => {
+                        // 삭제 확인 응답 — 갱신된 전체 수만 실어 보낸다 (facts는 빈 페이지)
+                        let total = self.store.stats().map(|(f, _, _)| f).unwrap_or(0);
+                        let _ = tx.send(Event::MemoryData { facts: Vec::new(), total });
+                    }
+                    Ok(_) => { let _ = tx.send(Event::Error { session: None, message: format!("삭제할 fact가 없음: {content}") }); }
+                    Err(e) => { let _ = tx.send(Event::Error { session: None, message: format!("fact 삭제 실패: {e}") }); }
+                },
+                Request::MemoryStats => {
+                    let (facts, sessions, decisions) = self.store.stats().unwrap_or((0, 0, 0));
+                    let _ = tx.send(Event::MemoryStats { facts, sessions, decisions });
                 }
             }
         }
@@ -238,8 +276,19 @@ impl Daemon {
         let registry = match mode { Mode::Mac => automaton_tools::Registry::mac_set(), _ => automaton_tools::Registry::coding_set() };
         let engine = self.engine.lock().clone();
 
-        // 시스템 프롬프트: 세션당 안정(캐시 프리픽스 보존) — 사용자 텍스트로 변하지 않음
-        let composed_prompt = self.stable_system_prompt(mode);
+        // 시스템 프롬프트: 세션당 안정(캐시 프리픽스 보존) — 사용자 텍스트로 변하지 않음.
+        // '이전 세션 요약'은 세션 첫 턴에 한 번 합성·고정 — 이후 턴은 캐시된 동일 블록을 재사용한다.
+        let mut history = self.store.messages(session).unwrap_or_default();
+        let mut composed_prompt = self.stable_system_prompt(mode);
+        let summary_block = if history.is_empty() {
+            self.prime_summary_block(session, text) // 첫 턴: 검색+캐시 (빈 블록도 캐시에 남기지 않음 — 재검색 방지는 아래 else 절)
+        } else {
+            self.summary_blocks.lock().get(session).cloned().unwrap_or_default()
+        };
+        if !summary_block.is_empty() {
+            composed_prompt.push_str("\n\n");
+            composed_prompt.push_str(&summary_block);
+        }
         let base_profile = automaton_core::ModeProfile::builtin(mode);
         let profile = automaton_core::ModeProfile {
             mode,
@@ -247,8 +296,6 @@ impl Daemon {
             system_prompt: composed_prompt,
         };
         let loop_ = AgentLoop::with_profile(&*self.provider, self.gate.clone(), engine, registry, profile);
-
-        let mut history = self.store.messages(session).unwrap_or_default();
 
         // 관련 기억을 히스토리 끝(현재 사용자 메시지 직전)에 주입 — 캐시 프리픽스 최소 교란
         // 시스템 프롬프트+기존 히스토리는 그대로 → API 프리픽스 캐시 히트
@@ -282,6 +329,98 @@ impl Daemon {
                 let _ = self.store.append_message(session, &m.role, &m.content);
             }
         }
+        // 마지막 메시지 저장 시점 = 요약기의 유휴(세션 종료) 판정 기준 갱신
+        self.last_activity.lock().insert(session.to_string(), Instant::now());
+    }
+
+    // ── 세션 요약기 (§7 작업 계층) ────────────────────────────────────────────
+
+    /// 요약 대상 세션 수집 — force_all=true면 유휴 무시 전체(새 세션 시작 트리거),
+    /// 아니면 마지막 활동 후 summary_idle 경과 세션. 요약할 새 메시지가 쌓인 세션만.
+    fn due_sessions(&self, force_all: bool) -> Vec<String> {
+        let now = Instant::now();
+        let activity = self.last_activity.lock();
+        let summarized = self.summarized_len.lock();
+        let inflight = self.summarizing.lock();
+        let mut due = Vec::new();
+        for (s, last) in activity.iter() {
+            let msgs = self.store.messages(s).map(|m| m.len()).unwrap_or(0);
+            if msgs > summarized.get(s).copied().unwrap_or(0)
+                && (force_all || now.duration_since(*last) >= self.summary_idle)
+                && !inflight.contains(s)
+            {
+                due.push(s.clone());
+            }
+        }
+        due
+    }
+
+    /// 백그라운드 세션 요약 루프 — 폴링 주기 = summary_idle/3 (기본 30초 판정 / 10초 폴링)
+    async fn session_summarizer(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(self.summary_idle / 3).await;
+            for s in self.due_sessions(false) {
+                let d = self.clone();
+                tokio::spawn(async move { d.summarize_session(&s).await; });
+            }
+        }
+    }
+
+    /// 세션 messages를 LLM에 보내 3줄 요약 생성 → summaries 테이블 저장.
+    /// Provider 재사용 + 요약 전용 프롬프트(짧은 출력 지시·툴 없음·usage 추적 없음).
+    async fn summarize_session(&self, session: &str) {
+        if !self.summarizing.lock().insert(session.to_string()) { return; } // 중복 실행 방지
+        let msgs = self.store.messages(session).unwrap_or_default();
+        if msgs.is_empty() {
+            self.summarizing.lock().remove(session);
+            return;
+        }
+        let bounded: Vec<automaton_core::Message> = msgs.iter().rev().take(40).rev().cloned().collect(); // 최근 40개로 바운드
+        let req = CompletionRequest {
+            system: "너는 세션 요약 도우미다. 주어진 대화를 정확히 3줄로 요약하라. 각 줄은 한 문장으로 간결하게 쓰고, 출력은 요약 3줄만 한다. 인사말·설명·표식은 금지.".into(),
+            messages: bounded,
+            tools: Vec::new(),
+            track_usage: false,
+        };
+        match self.provider.complete(req).await {
+            Ok(items) => {
+                let text: String = items.into_iter().filter_map(|i| match i { StreamItem::Delta(d) => Some(d), _ => None }).collect();
+                let text = text.trim();
+                if !text.is_empty() && self.store.save_summary(session, text).is_ok() {
+                    self.summarized_len.lock().insert(session.to_string(), msgs.len());
+                } else {
+                    // 빈 응답/저장 실패 — 활동 시각 갱신으로 다음 유휴 주기에 재시도
+                    eprintln!("세션 요약 공백/저장 실패 — 재시도 예약: {session}");
+                    self.last_activity.lock().insert(session.to_string(), Instant::now());
+                }
+            }
+            Err(e) => {
+                eprintln!("세션 요약 생성 실패({session}): {e} — 다음 유휴 주기에 재시도");
+                self.last_activity.lock().insert(session.to_string(), Instant::now());
+            }
+        }
+        self.summarizing.lock().remove(session);
+    }
+
+    /// 세션 첫 턴에 '이전 세션 요약' 블록 결정·캐시 — 첫 메시지 키워드로 search_summaries,
+    /// 없으면 최근 요약 폴백. 이후 턴은 summary_blocks 캐시로 프롬프트 안정성 유지.
+    fn prime_summary_block(&self, session: &str, user_text: &str) -> String {
+        let mut picks: Vec<String> = Vec::new();
+        for kw in automaton_memory::extract_keywords(user_text).iter().take(3) {
+            for hit in self.store.search_summaries(kw).unwrap_or_default() {
+                if !picks.contains(&hit) { picks.push(hit); }
+            }
+        }
+        if picks.is_empty() {
+            picks = self.store.recent_summaries(3, session).unwrap_or_default(); // 자기 세션 제외
+        }
+        if picks.is_empty() { return String::new(); }
+        let mut block = String::from("## 이전 세션 요약\n");
+        for s in picks.iter().take(3) {
+            block.push_str(&format!("- {}\n", s.replace('\n', " / ")));
+        }
+        self.summary_blocks.lock().insert(session.to_string(), block.clone());
+        block
     }
 
     /// 안정 시스템 프롬프트 — 세션 수명 동안 불변(캐시 프리픽스 보존)
@@ -295,15 +434,9 @@ impl Daemon {
     }
 
     /// 사용자 텍스트 기반 관련 기억 검색 → 히스토리 끝에 주입할 블록 조합
+    /// search_facts_related: 한글 조사 제거·동의어 확장·관련도 랭킹 + 무결과 시 최근 facts 폴백
     fn relevant_facts(&self, user_text: &str) -> String {
-        let keywords: Vec<String> = user_text.split(|c: char| !c.is_alphanumeric())
-            .filter(|t| !t.is_empty() && t.len() > 1)
-            .map(|t| t.to_lowercase())
-            .take(5)
-            .collect();
-        if keywords.is_empty() { return String::new(); }
-        let query = keywords.join(" ");
-        let facts = self.store.search_facts(&query).unwrap_or_default();
+        let facts = self.store.search_facts_related(user_text, 5).unwrap_or_default();
         if facts.is_empty() { return String::new(); }
         let mut block = String::from("## 사용자에 대해 알고 있는 것\n");
         for f in facts.iter().take(5) {
@@ -352,6 +485,8 @@ fn session_of(ev: &Event) -> Option<String> {
         | Event::ApprovalRequested { session, .. } | Event::DraftSuggestions { session, .. } | Event::Usage { session, .. }
         | Event::ModeChanged { session, .. } => Some(session.clone()),
         Event::Error { session, .. } => session.clone(),
+        // 메모리 브라우저 응답은 세션 스코프 아님 — 감사 대상 제외
+        Event::MemoryData { .. } | Event::MemoryStats { .. } => None,
     }
 }
 
