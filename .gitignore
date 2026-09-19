@@ -1,0 +1,5 @@
+.superpowers/
+.worktrees/
+/target
+!reference/
+.build/

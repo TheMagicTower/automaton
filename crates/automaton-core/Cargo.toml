@@ -1,0 +1,20 @@
+[package]
+name = "automaton-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+automaton-proto = { path = "../automaton-proto" }
+automaton-policy = { path = "../automaton-policy" }
+automaton-tools = { path = "../automaton-tools" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+parking_lot.workspace = true
