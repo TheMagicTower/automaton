@@ -184,7 +184,18 @@ impl Daemon {
         // &dyn Provider 전달 — Chunk 2의 &P 포워딩 구현 사용 (Box 소유권 유지, 실측 E0277 반영)
         let loop_ = AgentLoop::new(&*self.provider, self.gate.clone(), engine, registry, mode);
         let mut history = self.store.messages(session).unwrap_or_default();
-        let mut emit = move |e: Event| { let _ = tx.send(e); }; // Send 클로저 — run_turn의 + Send 바운드 충족(실측 반영)
+        let d = self.clone(); // 3단계 초안 발행용 Arc 사본 — emit 클로저로 이동
+        let mut emit = move |e: Event| {
+            let _ = tx.send(e.clone());
+            // 3단계(§6) — 승인 배너 직후 답변 초안 발행. 같은 채널로 직렬화되어
+            // ApprovalRequested → DraftSuggestions 순서가 보장된다. 초안은 칩일 뿐 승인 아님.
+            if let Event::ApprovalRequested { ref session, ref action, .. } = e {
+                let drafts = d.apprentice.drafts_for(action).unwrap_or_default();
+                if !drafts.is_empty() {
+                    let _ = tx.send(Event::DraftSuggestions { session: session.clone(), suggestions: drafts });
+                }
+            }
+        }; // Send 클로저 — run_turn의 + Send 바운드 충족(실측 반영)
         let prior = history.len(); // 신규 분절만 저장 — 기존 재기록 시 매 턴 중복 증식(실측 결함)
         if let Err(e) = loop_.run_turn(session, &mut history, text.to_string(), &mut emit).await {
             let _ = emit(Event::Error { session: Some(session.to_string()), message: format!("턴 실패: {e}") }); // 침묵 끊김 방지 (리뷰 자문)
@@ -196,7 +207,7 @@ impl Daemon {
 fn session_of(ev: &Event) -> Option<String> {
     match ev {
         Event::StreamDelta { session, .. } | Event::ToolStarted { session, .. } | Event::ToolResult { session, .. }
-        | Event::ApprovalRequested { session, .. } | Event::ModeChanged { session, .. } => Some(session.clone()),
+        | Event::ApprovalRequested { session, .. } | Event::DraftSuggestions { session, .. } | Event::ModeChanged { session, .. } => Some(session.clone()),
         Event::Error { session, .. } => session.clone(),
     }
 }

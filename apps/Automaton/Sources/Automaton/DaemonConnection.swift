@@ -15,10 +15,11 @@ enum ShellEvent: Codable, Sendable {
     case toolStarted(session: String, tool: String, summary: String)
     case toolResult(session: String, tool: String, ok: Bool, summary: String)
     case approvalRequested(session: String, approval: String, action: ActionInfo, hint: Hint?)
+    case draftSuggestions(session: String, suggestions: [String])
     case modeChanged(session: String, mode: Mode)
     case error(session: String?, message: String)
 
-    enum CodingKeys: String, CodingKey { case type, session, delta, tool, summary, ok, approval, action, hint, mode, message }
+    enum CodingKeys: String, CodingKey { case type, session, delta, tool, summary, ok, approval, action, hint, mode, message, suggestions }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -28,6 +29,7 @@ enum ShellEvent: Codable, Sendable {
         case "tool_started": self = .toolStarted(session: try c.decode(String.self, forKey: .session), tool: try c.decode(String.self, forKey: .tool), summary: try c.decode(String.self, forKey: .summary))
         case "tool_result": self = .toolResult(session: try c.decode(String.self, forKey: .session), tool: try c.decode(String.self, forKey: .tool), ok: try c.decode(Bool.self, forKey: .ok), summary: try c.decode(String.self, forKey: .summary))
         case "approval_requested": self = .approvalRequested(session: try c.decode(String.self, forKey: .session), approval: try c.decode(String.self, forKey: .approval), action: try c.decode(ActionInfo.self, forKey: .action), hint: try c.decodeIfPresent(Hint.self, forKey: .hint))
+        case "draft_suggestions": self = .draftSuggestions(session: try c.decode(String.self, forKey: .session), suggestions: try c.decode([String].self, forKey: .suggestions))
         case "mode_changed": self = .modeChanged(session: try c.decode(String.self, forKey: .session), mode: try c.decode(Mode.self, forKey: .mode))
         case "error": self = .error(session: try c.decodeIfPresent(String.self, forKey: .session), message: try c.decode(String.self, forKey: .message))
         default: throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "알 수 없는 이벤트: \(type)")

@@ -18,6 +18,7 @@ final class ShellModel {
     var mode: Mode = .chat
     var stream: [String] = []
     var pendingApproval: (id: String, action: ActionInfo, hint: Hint?)?
+    var draftSuggestions: [String] = []
     var connected = false
     let voiceOutput = VoiceOutputManager() // §12 1단계 TTS — streamDelta 구독
     private let conn = DaemonConnection()
@@ -43,7 +44,8 @@ final class ShellModel {
         case .streamDelta(_, let delta): stream.append(delta); voiceOutput.append(delta: delta)
         case .toolStarted(_, let tool, _): stream.append("\n⚙ \(tool)"); voiceOutput.flush()
         case .toolResult(_, let tool, let ok, let summary): stream.append(ok ? " ✓ \(tool)" : " ✗ \(tool): \(summary)")
-        case .approvalRequested(_, let id, let action, let hint): pendingApproval = (id, action, hint)
+        case .approvalRequested(_, let id, let action, let hint): pendingApproval = (id, action, hint); draftSuggestions = [] // 새 배너에는 낡은 칩 없음
+        case .draftSuggestions(_, let suggestions): draftSuggestions = suggestions
         case .modeChanged(_, let mode): self.mode = mode
         case .error(_, let message): stream.append("\n⚠ \(message)")
         }
@@ -64,6 +66,7 @@ final class ShellModel {
         guard let p = pendingApproval else { return }
         Task { await conn.sendRequest(method: "approval_respond", params: ["session": session, "approval": p.id, "decision": approve ? "approve" : "deny", "always": always]) }
         pendingApproval = nil
+        draftSuggestions = []
     }
 }
 
@@ -84,6 +87,7 @@ struct ShellView: View {
             }
             if let p = model.pendingApproval {
                 ApprovalBanner(action: p.action, hint: p.hint) { ok, always in model.respond(approve: ok, always: always) }
+                if !model.draftSuggestions.isEmpty { draftChips }
             }
             inputBar
         }
@@ -142,6 +146,23 @@ struct ShellView: View {
         }
         .buttonStyle(.plain)
         .help(voiceInput.statusNote ?? (voiceInput.enabled ? "Push-to-Talk: Cmd+Shift+Space 길게 눌러 말하기" : "음성 입력 켜기"))
+    }
+
+
+    /// §6 3단계 답변 초안 칩 — 클릭하면 입력창에 해당 텍스트가 채워진다(전송은 사용자 몫).
+    private var draftChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(model.draftSuggestions, id: \.self) { s in
+                    Button { draft = s } label: {
+                        Text(s).font(.caption).padding(.horizontal, 10).padding(.vertical, 4)
+                            .background(Capsule().fill(Theme.brass.opacity(0.15)))
+                            .overlay(Capsule().strokeBorder(Theme.gold.opacity(0.6)))
+                            .foregroundStyle(Theme.ivory)
+                    }.buttonStyle(.plain)
+                }
+            }.padding(.horizontal, 10).padding(.bottom, 6)
+        }
     }
 
     private var inputBar: some View {

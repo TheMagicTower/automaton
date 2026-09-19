@@ -1,7 +1,7 @@
 //! automaton-apprentice 1단계 (§6) — 결정 저널 + 유사 결정 kNN(FTS 근사) 힌트.
 //! 출력은 참고용 어드바이저. Policy Engine을 우회하지 않는다(§6 안전장치 — 루프는 hint를 이벤트에만 싣는다).
 
-use automaton_memory::MemoryStore;
+use automaton_memory::{Decision, MemoryStore};
 use automaton_proto::{ActionInfo, Hint};
 
 #[derive(Debug, thiserror::Error)]
@@ -88,5 +88,35 @@ impl Apprentice {
     /// 선호 스코어러를 통한 P(approve) 조회 — 배너 기본값 사전 선택용 어드바이저.
     pub fn preference_score(&self, tool: &str) -> Result<PreferenceScore> {
         PreferenceScorer { apprentice: self }.score(tool)
+    }
+}
+
+/// 3단계(§6) — 답장 자동완성 초안 composer. 로컬 소형 LM 대신 결정 저널의
+/// 승인 패턴에서 입력창 칩에 실을 답변 초안을 만든다(§6 M1 근사).
+/// 출력은 어드바이저 — 초안 클릭이 곧 승인이 아니며 Policy Engine을 우회하지 않는다.
+pub struct DraftComposer;
+
+impl DraftComposer {
+    /// 동일 툴 과거 승인 3회 이상일 때만 초안 생성 — 근거 없는 초안은
+    /// 승인 벼락(automation bias)을 부추긴다. 이력 부족 시 빈 벡터.
+    pub fn generate_drafts(&self, tool: &str, target: &str, past_decisions: &[Decision]) -> Vec<String> {
+        let approvals = past_decisions.iter()
+            .filter(|d| d.tool == tool && d.decision == "approve")
+            .count();
+        if approvals < 3 { return Vec::new(); }
+        vec![
+            "진행해".into(),
+            "허용".into(),
+            "확인했어".into(),
+            format!("확인했어, {target} 진행해"), // 컨텍스트 기반 — 타깃을 언급한 명시적 초안
+        ]
+    }
+}
+
+impl Apprentice {
+    /// 3단계 — 승인 배너용 답변 초안 조회. 저널에서 해당 툴 결정을 모아 DraftComposer에 위임.
+    pub fn drafts_for(&self, action: &ActionInfo) -> Result<Vec<String>> {
+        let past = self.store.decisions_by_tool(&action.tool)?;
+        Ok(DraftComposer.generate_drafts(&action.tool, &action.target, &past))
     }
 }

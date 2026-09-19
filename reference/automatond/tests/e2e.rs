@@ -150,3 +150,66 @@ async fn ask_path_requires_approval_roundtrip() {
     assert!(evs.iter().any(|e| matches!(e, Event::ToolResult { ok: true, .. })));
     assert!(!target.exists(), "승인 후 파일이 삭제되어야 함");
 }
+
+#[tokio::test]
+async fn approval_after_three_approvals_emits_draft_suggestions() {
+    let root = tmp_root("drafts");
+    let paths = Paths { data_dir: root.join("data"), config_dir: root.join("config") };
+    let dir = root.join("work");
+    std::fs::create_dir_all(&dir).unwrap();
+    let targets: Vec<_> = (0..4).map(|i| {
+        let t = dir.join(format!("f{i}.txt"));
+        std::fs::write(&t, "x").unwrap();
+        t
+    }).collect();
+    let tool = |i: usize| StreamItem::ToolCall(automaton_core::ToolCall { name: "fs.delete".into(), args: json!({"path": &targets[i]}) });
+    let provider = Scripted {
+        turns: Mutex::new(vec![
+            vec![tool(0)], vec![StreamItem::Delta("완료".into())],
+            vec![tool(1)], vec![StreamItem::Delta("완료".into())],
+            vec![tool(2)], vec![StreamItem::Delta("완료".into())],
+            vec![tool(3)],
+        ]),
+        call: Mutex::new(0),
+    };
+    let socket = root.join("d.sock");
+    let d = std::sync::Arc::new(Daemon::new(Box::new(provider), paths));
+    tokio::spawn(d.clone().serve(socket.clone()));
+    let mut stream = None;
+    for _ in 0..10 {
+        if let Ok(s) = tokio::net::UnixStream::connect(&socket).await { stream = Some(s); break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let stream = stream.expect("데몬 소켓 연결 실패");
+    let (rd, mut wr) = stream.into_split();
+    let mut reader = BufReader::new(rd);
+    wr.write_all(b"{\"method\":\"session_create\",\"params\":{\"id\":\"s1\"}}\n").await.unwrap();
+    wr.write_all(b"{\"method\":\"mode_switch\",\"params\":{\"session\":\"s1\",\"to\":\"code\"}}\n").await.unwrap();
+
+    // 승인 3회 — 각 라운드: 배너 수신 → 승인 응답 → 턴 완료 대기
+    for _ in 0..3 {
+        wr.write_all("{\"method\":\"message_send\",\"params\":{\"session\":\"s1\",\"text\":\"삭제해\"}}\n".as_bytes()).await.unwrap();
+        let evs = read_events(&mut reader, "ApprovalRequested").await;
+        let approval = evs.iter().find_map(|e| match e {
+            Event::ApprovalRequested { approval, .. } => Some(approval.clone()),
+            _ => None,
+        }).expect("ApprovalRequested 미수신");
+        let resp = format!("{{\"method\":\"approval_respond\",\"params\":{{\"session\":\"s1\",\"approval\":\"{approval}\",\"decision\":\"approve\",\"always\":false}}}}\n");
+        wr.write_all(resp.as_bytes()).await.unwrap();
+        let _ = read_events(&mut reader, "StreamDelta").await;
+    }
+
+    // 4번째 배너 — 승인 3회 이력이 있으므로 답변 초안이 뒤따라야 한다 (§6 3단계)
+    wr.write_all("{\"method\":\"message_send\",\"params\":{\"session\":\"s1\",\"text\":\"삭제해\"}}\n".as_bytes()).await.unwrap();
+    let evs = read_events(&mut reader, "DraftSuggestions").await;
+    let idx_approval = evs.iter().position(|e| matches!(e, Event::ApprovalRequested { .. })).expect("배너가 초안보다 먼저");
+    let idx_drafts = evs.iter().position(|e| matches!(e, Event::DraftSuggestions { .. })).expect("DraftSuggestions 미수신");
+    assert!(idx_approval < idx_drafts, "DraftSuggestions는 ApprovalRequested 직후에 발행되어야 함");
+    match &evs[idx_drafts] {
+        Event::DraftSuggestions { session, suggestions } => {
+            assert_eq!(session, "s1");
+            assert!(suggestions.iter().any(|s| s == "진행해"), "초안에 '진행해' 필요: {suggestions:?}");
+        }
+        _ => unreachable!(),
+    }
+}

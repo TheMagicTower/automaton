@@ -45,6 +45,8 @@ pub enum Event {
     ToolStarted { session: String, tool: String, summary: String },
     ToolResult { session: String, tool: String, ok: bool, summary: String },
     ApprovalRequested { session: String, approval: String, action: ActionInfo, hint: Option<Hint> },
+    /// Apprentice 3단계 답변 초안 (§6) — 승인 배너 직후 발행, 칩은 어드바이저일 뿐 승인 아님
+    DraftSuggestions { session: String, suggestions: Vec<String> },
     ModeChanged { session: String, mode: Mode },
     Error { session: Option<String>, message: String },
 }

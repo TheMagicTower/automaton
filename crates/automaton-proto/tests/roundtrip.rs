@@ -22,6 +22,14 @@ fn approval_request_event_roundtrip() {
 }
 
 #[test]
+fn draft_suggestions_event_roundtrip() {
+    let ev = Event::DraftSuggestions { session: "s1".into(), suggestions: vec!["진행해".into(), "허용".into()] };
+    let json = serde_json::to_string(&ev).unwrap();
+    assert!(json.contains(r#""draft_suggestions""#));
+    assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), ev);
+}
+
+#[test]
 fn mode_serializes_lowercase() {
     assert_eq!(serde_json::to_string(&Mode::Mac).unwrap(), r#""mac""#);
 }
