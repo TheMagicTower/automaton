@@ -20,8 +20,11 @@ final class ShellModel {
     var connected = false
     private let conn = DaemonConnection()
     private let session = "shell-\(UInt64(Date().timeIntervalSince1970))"
+    private var started = false
 
     func start() {
+        guard !started else { return }
+        started = true
         Task {
             let stream = await conn.events() // 연결 수립을 먼저 확정
             await conn.sendRequest(method: "session_create", params: ["id": session]) // 송신은 ready 전 큐잉됨

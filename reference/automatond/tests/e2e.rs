@@ -84,7 +84,6 @@ async fn allow_path_runs_tool_streams_and_audits() {
     // (store는 데몬 내부 — 재시작 검증은 Chunk 5 셸 연동 시점에 확장)
     // 중복 재기록 회귀 가드: append는 턴 종료 후 비동기라 짧은 재시도로 행 수 단언 (리뷰 자문)
     let db = root.join("data/memory.db");
-    let _ = std::fs::read_to_string(&db).is_ok();
     let mut rows = 0;
     for _ in 0..20 {
         if let Ok(store) = automaton_memory::MemoryStore::open(&db) {
@@ -94,4 +93,60 @@ async fn allow_path_runs_tool_streams_and_audits() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     assert!(rows >= 2, "세션 메시지 미저장 또는 재기록 결함 (rows={rows})");
+}
+
+#[tokio::test]
+async fn ask_path_requires_approval_roundtrip() {
+    let root = tmp_root("approval");
+    let paths = Paths { data_dir: root.join("data"), config_dir: root.join("config") };
+    let dir = root.join("work");
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("to_delete.txt");
+    std::fs::write(&target, "delete me").unwrap();
+    let provider = Scripted {
+        turns: Mutex::new(vec![
+            vec![StreamItem::ToolCall(automaton_core::ToolCall { name: "fs.delete".into(), args: json!({"path": &target}) })],
+            vec![StreamItem::Delta("삭제 완료".into())],
+        ]),
+        call: Mutex::new(0),
+    };
+    let socket = root.join("d.sock");
+    let d = std::sync::Arc::new(Daemon::new(Box::new(provider), paths));
+    tokio::spawn(d.clone().serve(socket.clone()));
+    let mut stream = None;
+    for _ in 0..10 {
+        if let Ok(s) = tokio::net::UnixStream::connect(&socket).await { stream = Some(s); break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let stream = stream.expect("데몬 소켓 연결 실패");
+    let (rd, mut wr) = stream.into_split();
+    let mut reader = BufReader::new(rd);
+    wr.write_all(b"{\"method\":\"session_create\",\"params\":{\"id\":\"s1\"}}\n").await.unwrap();
+    wr.write_all(b"{\"method\":\"mode_switch\",\"params\":{\"session\":\"s1\",\"to\":\"code\"}}\n").await.unwrap();
+    wr.write_all("{\"method\":\"message_send\",\"params\":{\"session\":\"s1\",\"text\":\"삭제해\"}}\n".as_bytes()).await.unwrap();
+
+    let mut evs = vec![];
+    let mut line = String::new();
+    let mut approval_id = None;
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).await.unwrap() == 0 { break; }
+        let ev: Event = serde_json::from_str(line.trim()).unwrap();
+        if let Event::ApprovalRequested { ref approval, .. } = ev {
+            approval_id = Some(approval.clone());
+            evs.push(ev);
+            break;
+        }
+        evs.push(ev);
+    }
+    let approval = approval_id.expect("ApprovalRequested 이벤트 수신 실패");
+    let resp = format!("{{\"method\":\"approval_respond\",\"params\":{{\"session\":\"s1\",\"approval\":\"{approval}\",\"decision\":\"approve\",\"always\":false}}}}\n");
+    wr.write_all(resp.as_bytes()).await.unwrap();
+
+    let rest = read_events(&mut reader, "StreamDelta").await;
+    evs.extend(rest);
+
+    assert!(evs.iter().any(|e| matches!(e, Event::ToolStarted { tool, .. } if tool == "fs.delete")));
+    assert!(evs.iter().any(|e| matches!(e, Event::ToolResult { ok: true, .. })));
+    assert!(!target.exists(), "승인 후 파일이 삭제되어야 함");
 }

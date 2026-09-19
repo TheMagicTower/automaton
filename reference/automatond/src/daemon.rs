@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 pub struct Paths {
     pub data_dir: PathBuf,    // ~/.local/share/automaton
@@ -35,6 +35,7 @@ impl Paths {
 pub struct Daemon {
     pub provider: Box<dyn Provider>,
     pub paths: Paths,
+    pub gate: Arc<SessionGate>,
     engine: Mutex<Engine>,
     apprentice: Apprentice,
     store: MemoryStore,
@@ -60,7 +61,8 @@ impl Daemon {
         });
         let store = MemoryStore::open(&paths.memory()).expect("메모리 DB 열기 실패");
         let apprentice = Apprentice::open(&paths.memory()).expect("Apprentice DB 열기 실패");
-        Daemon { provider, paths, engine: Mutex::new(engine), apprentice, store, sessions: Mutex::new(HashMap::new()), pending_asks: Mutex::new(HashMap::new()), approval_seq: std::sync::atomic::AtomicU64::new(1) }
+        let gate = Arc::new(SessionGate::new());
+        Daemon { provider, paths, gate, engine: Mutex::new(engine), apprentice, store, sessions: Mutex::new(HashMap::new()), pending_asks: Mutex::new(HashMap::new()), approval_seq: std::sync::atomic::AtomicU64::new(1) }
     }
 
     pub async fn serve(self: Arc<Self>, socket: PathBuf) -> std::io::Result<()> {
@@ -108,8 +110,11 @@ impl Daemon {
                             let _ = self.apprentice.note_decision(&session, &ActionInfo { tool: tool.clone(), target: target.clone(), risk: String::new() }, "ask", if approved { "approve" } else { "deny" });
                             if always && approved { // 거절+항상허용 조합은 Allow 발행 금지 (프로토콜 수비, 리뷰 반영)
                                 let mut e = self.engine.lock();
-                                e.grant_always(Rule { name: format!("granted-{approval}-{tool}"), tool: Some(tool), app: None, category: None, verdict: VerdictTemplate::Allow });
+                                e.grant_always(Rule { name: format!("granted-{approval}-{tool}"), tool: Some(tool.clone()), app: None, category: None, verdict: VerdictTemplate::Allow });
                                 let _ = e.save(&self.paths.policy());
+                            }
+                            if let Some(tx) = self.gate.pending.lock().remove(&tool) {
+                                let _ = tx.send(decision);
                             }
                         }
                         None => {
@@ -167,7 +172,7 @@ impl Daemon {
         let registry = match mode { Mode::Mac => automaton_tools::Registry::mac_set(), _ => automaton_tools::Registry::coding_set() };
         let engine = self.engine.lock().clone();
         // &dyn Provider 전달 — Chunk 2의 &P 포워딩 구현 사용 (Box 소유권 유지, 실측 E0277 반영)
-        let loop_ = AgentLoop::new(&*self.provider, DenyGate, engine, registry, mode);
+        let loop_ = AgentLoop::new(&*self.provider, self.gate.clone(), engine, registry, mode);
         let mut history = self.store.messages(session).unwrap_or_default();
         let mut emit = move |e: Event| { let _ = tx.send(e); }; // Send 클로저 — run_turn의 + Send 바운드 충족(실측 반영)
         let prior = history.len(); // 신규 분절만 저장 — 기존 재기록 시 매 턴 중복 증식(실측 결함)
@@ -186,10 +191,31 @@ fn session_of(ev: &Event) -> Option<String> {
     }
 }
 
-/// 승인 없이 진행 불가 — M1 기본값: ASK는 거부(셸-데몬 승인 채널 완성 전 안전 기본값).
-/// E2E(Task 12)는 allow-only 시나리오로 검증하고, 승인 배너 왕복은 Chunk 5에서 pending 맵+oneshot 게이트로 완성한다.
-struct DenyGate;
+/// 세션당 직렬 승인 게이트 — ASK 시 oneshot 등록 후 ApprovalRespond 대기.
+pub struct SessionGate {
+    pub pending: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
+}
+
+impl SessionGate {
+    pub fn new() -> Self {
+        SessionGate { pending: Mutex::new(HashMap::new()) }
+    }
+}
+
+impl Default for SessionGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
-impl ApprovalGate for DenyGate {
-    async fn decide(&self, _a: ActionInfo) -> ApprovalOutcome { ApprovalOutcome::Deny }
+impl ApprovalGate for SessionGate {
+    async fn decide(&self, action: ActionInfo) -> ApprovalOutcome {
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().insert(action.tool, tx);
+        match rx.await {
+            Ok(Decision::Approve) => ApprovalOutcome::Approve,
+            _ => ApprovalOutcome::Deny,
+        }
+    }
 }

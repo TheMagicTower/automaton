@@ -27,6 +27,11 @@ impl<G: ApprovalGate + ?Sized> ApprovalGate for Box<G> {
     async fn decide(&self, action: ActionInfo) -> ApprovalOutcome { (**self).decide(action).await }
 }
 
+#[async_trait::async_trait]
+impl<G: ApprovalGate + ?Sized> ApprovalGate for std::sync::Arc<G> {
+    async fn decide(&self, action: ActionInfo) -> ApprovalOutcome { (**self).decide(action).await }
+}
+
 // 참조(&dyn) 전달 구현 — 데몬이 Box<dyn Provider>를 참조로 넘길 때 필요 (Chunk 4 리뷰 반영)
 #[async_trait::async_trait]
 impl<P: Provider + ?Sized> Provider for &P {
