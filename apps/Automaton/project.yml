@@ -1,0 +1,24 @@
+name: Automaton
+options:
+  bundleIdPrefix: com.themagictower
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+targets:
+  Automaton:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/Automaton
+    settings:
+      base:
+        INFOPLIST_KEY_LSUIElement: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.themagictower.automaton
+        PRODUCT_NAME: Automaton
+        SWIFT_VERSION: "6.0"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: "NO"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Automaton
+        ENABLE_HARDENED_RUNTIME: NO
