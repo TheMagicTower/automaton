@@ -40,8 +40,8 @@ pub struct Daemon {
     apprentice: Apprentice,
     store: MemoryStore,
     sessions: Mutex<HashMap<String, Mode>>,
-    /// 승인 id → (툴, 타깃) — "항상 허용" 스코프·팬텀 id 차단(§5) + 저널 target 공급(§6, 리뷰 반영)
-    pending_asks: Mutex<HashMap<String, (String, String)>>,
+    /// 승인 id → (발행 세션, 툴, 타깃) — 세션 바인딩 검증(F-03) + "항상 허용" 스코프·팬텀 id 차단(§5) + 저널 target 공급(§6)
+    pending_asks: Mutex<HashMap<String, (String, String, String)>>,
     /// 데몬 전역 승인 id 발급기 — 루프의 턴 로컬 seq 충돌 방지
     approval_seq: std::sync::atomic::AtomicU64,
 }
@@ -102,33 +102,75 @@ impl Daemon {
                     let _ = tx.send(Event::ModeChanged { session: id, mode: Mode::Chat });
                 }
                 Request::ModeSwitch { session, to } => {
-                    // §5 모드 전환 승인은 프로토콜 계약 — 셸이 승인 배너로 사용자 확인 후에만 이 요청을 보낸다.
-                    self.sessions.lock().insert(session.clone(), to);
-                    let _ = tx.send(Event::ModeChanged { session, mode: to });
+                    // F-03: 모드 전환을 셸 프로토콜 계약(배너 확인 후 전송)만으로 신뢰하지 않고
+                    // 데몬 측 승인 게이트를 통과시킨다 — ApprovalRequested 발행 → 승인 응답 시에만 적용.
+                    let key = format!("{session}:mode.switch");
+                    let (waiter, rx) = oneshot::channel();
+                    {
+                        let mut pending = self.gate.pending.lock();
+                        if pending.contains_key(&key) {
+                            let _ = tx.send(Event::Error { session: Some(session), message: "모드 전환 승인 대기 중 — 중복 요청 거부".into() });
+                            continue;
+                        }
+                        pending.insert(key, waiter);
+                    }
+                    // approval id는 writer_loop가 데몬 전역 유니크로 재발급해 pending_asks에 등록한다.
+                    let _ = tx.send(Event::ApprovalRequested {
+                        session: session.clone(),
+                        approval: String::new(),
+                        action: ActionInfo { tool: "mode.switch".into(), target: format!("{to:?}").to_lowercase(), risk: "모드 전환".into() },
+                        hint: None,
+                    });
+                    let d = self.clone();
+                    let tx_gate = tx.clone();
+                    tokio::spawn(async move {
+                        match rx.await {
+                            Ok(Decision::Approve) => {
+                                d.sessions.lock().insert(session.clone(), to);
+                                let _ = tx_gate.send(Event::ModeChanged { session, mode: to });
+                            }
+                            _ => {
+                                let _ = tx_gate.send(Event::Error { session: Some(session), message: "모드 전환 거절됨".into() });
+                            }
+                        }
+                    });
                 }
                 Request::ApprovalRespond { session, approval, decision, always } => {
-                    // 승인 id 검증 + 툴 스코프 + 결정 저널(§5·§6) — 응답 시점에 실제 target으로 기록 (리뷰 반영: FTS는 target만 색인)
-                    let entry = self.pending_asks.lock().remove(&approval);
-                    match entry {
-                        Some((tool, target)) => {
+                    // 승인 id 검증 + 세션 바인딩(F-03) + 툴 스코프 + 결정 저널(§5·§6) — 응답 시점에 실제 target으로 기록
+                    let lookup = {
+                        let mut asks = self.pending_asks.lock();
+                        if let Some((ask_session, tool, target)) = asks.get(&approval).cloned() {
+                            if ask_session != session {
+                                Err(format!("승인 id {approval}는 세션 {ask_session}에 귀속 — 세션 {session}의 응답은 거부됨 (승인 세션 바인딩)"))
+                            } else {
+                                asks.remove(&approval);
+                                Ok((tool, target))
+                            }
+                        } else {
+                            Err(format!("발행되지 않은 승인 id: {approval}"))
+                        }
+                    };
+                    match lookup {
+                        Ok((tool, target)) => {
                             let approved = decision == Decision::Approve;
                             let _ = self.apprentice.note_decision(&session, &ActionInfo { tool: tool.clone(), target: target.clone(), risk: String::new() }, "ask", if approved { "approve" } else { "deny" });
                             if always && approved { // 거절+항상허용 조합은 Allow 발행 금지 (프로토콜 수비, 리뷰 반영)
-                                if tool == "shell.exec" {
-                                    // 보안 불변식: shell.exec에 대한 툴 단위 무제한 '항상 허용'은 금지 (임의 셸 명령 실행 위험 차단)
-                                    eprintln!("보안 경고: shell.exec는 영구 '항상 허용' 규칙으로 등록 불가 (매회 승인 필요)");
+                                if tool == "shell.exec" || tool == "mode.switch" {
+                                    // 보안 불변식: 임의 셸 실행·모드 전환의 툴 단위 무제한 '항상 허용'은 금지 (매회 승인 필요)
+                                    eprintln!("보안 경고: {tool}은(는) 영구 '항상 허용' 규칙으로 등록 불가 (매회 승인 필요)");
                                 } else {
                                     let mut e = self.engine.lock();
                                     e.grant_always(Rule { name: format!("granted-{approval}-{tool}"), tool: Some(tool.clone()), app: None, category: None, verdict: VerdictTemplate::Allow });
                                     let _ = e.save(&self.paths.policy());
                                 }
                             }
-                            if let Some(tx) = self.gate.pending.lock().remove(&tool) {
-                                let _ = tx.send(decision);
+                            // F-05: waiter는 발행 (세션, 툴) 조합 키로만 해제 — 타 세션 동일 툴 waiter 오해제 방지
+                            if let Some(waiter) = self.gate.pending.lock().remove(&format!("{session}:{tool}")) {
+                                let _ = waiter.send(decision);
                             }
                         }
-                        None => {
-                            let _ = tx.send(Event::Error { session: Some(session), message: format!("발행되지 않은 승인 id: {approval}") });
+                        Err(message) => {
+                            let _ = tx.send(Event::Error { session: Some(session), message });
                         }
                     }
                 }
@@ -169,7 +211,9 @@ impl Daemon {
                 if let Some(h) = self.apprentice.hint_for(action).ok().flatten() {
                     *hint = Some(h); // 힌트는 별도 필드로만 전달 — risk 변형 시 배너 이중 표시 (리뷰 자문)
                 }
-                self.pending_asks.lock().insert(approval.clone(), (action.tool.clone(), action.target.clone()));
+                if let Some(s) = &session {
+                    self.pending_asks.lock().insert(approval.clone(), (s.clone(), action.tool.clone(), action.target.clone()));
+                }
             }
             // 2) 감사 로그(§5) — 힌트 부착된 최종 형태 기록 (사후 분석 일관성)
             if let Some(s) = &session {
@@ -311,7 +355,7 @@ fn session_of(ev: &Event) -> Option<String> {
     }
 }
 
-/// 세션당 직렬 승인 게이트 — ASK 시 oneshot 등록 후 ApprovalRespond 대기.
+/// 세션별 승인 게이트 — ASK 시 "{session}:{tool}" 키로 oneshot 등록 후 ApprovalRespond 대기 (F-05).
 pub struct SessionGate {
     pub pending: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
 }
@@ -330,9 +374,18 @@ impl Default for SessionGate {
 
 #[async_trait::async_trait]
 impl ApprovalGate for SessionGate {
-    async fn decide(&self, action: ActionInfo) -> ApprovalOutcome {
+    async fn decide(&self, session: &str, action: ActionInfo) -> ApprovalOutcome {
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().insert(action.tool, tx);
+        let key = format!("{session}:{}", action.tool);
+        {
+            let mut pending = self.pending.lock();
+            // F-05: 동일 (세션,툴) 중복 ASK는 기존 waiter를 덮어쓰지 않고 즉시 거부 —
+            // 덮어쓰기 시 첫 요청이 사용자 개입 없이 자동 Deny되는 혼동을 원천 차단.
+            if pending.contains_key(&key) {
+                return ApprovalOutcome::Deny;
+            }
+            pending.insert(key, tx);
+        }
         match rx.await {
             Ok(Decision::Approve) => ApprovalOutcome::Approve,
             _ => ApprovalOutcome::Deny,

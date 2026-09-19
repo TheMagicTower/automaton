@@ -2,7 +2,7 @@
 
 use automaton_core::{CompletionRequest, CoreError, Provider, StreamItem};
 use automatond::daemon::{Daemon, Paths};
-use automaton_proto::Event;
+use automaton_proto::{Event, Mode};
 use parking_lot::Mutex; // 즉시 lock — rs-parking-lot 룰 (std::sync::Mutex unwrap 불요)
 use serde_json::json;
 use std::path::PathBuf;
@@ -41,6 +41,19 @@ async fn read_events(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>, un
     evs
 }
 
+/// F-03: 모드 전환은 데몬 측 승인 게이트 통과 — mode.switch 배너 승인 응답 후 적용 확인
+async fn approve_mode_switch(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>, wr: &mut tokio::net::unix::OwnedWriteHalf, session: &str, expect: Mode) {
+    let evs = read_events(reader, "ApprovalRequested").await;
+    let approval = evs.iter().find_map(|e| match e {
+        Event::ApprovalRequested { approval, action, .. } if action.tool == "mode.switch" => Some(approval.clone()),
+        _ => None,
+    }).expect("모드 전환 승인 요청(mode.switch) 미수신");
+    let resp = format!("{{\"method\":\"approval_respond\",\"params\":{{\"session\":\"{session}\",\"approval\":\"{approval}\",\"decision\":\"approve\",\"always\":false}}}}\n");
+    wr.write_all(resp.as_bytes()).await.unwrap();
+    let evs = read_events(reader, "ModeChanged").await;
+    assert!(evs.iter().any(|e| matches!(e, Event::ModeChanged { mode, .. } if *mode == expect)), "승인 후 모드 적용 실패");
+}
+
 #[tokio::test]
 async fn allow_path_runs_tool_streams_and_audits() {
     let root = tmp_root("allow_path");
@@ -70,6 +83,7 @@ async fn allow_path_runs_tool_streams_and_audits() {
     wr.write_all(b"{\"method\":\"session_create\",\"params\":{\"id\":\"s1\"}}\n").await.unwrap();
     // Chat 기본 모드에서는 fs.write가 ASK → DenyGate 거부되므로 code 모드로 전환 후 전송 (실측 반영)
     wr.write_all(b"{\"method\":\"mode_switch\",\"params\":{\"session\":\"s1\",\"to\":\"code\"}}\n").await.unwrap();
+    approve_mode_switch(&mut reader, &mut wr, "s1", Mode::Code).await; // F-03: 데몬 측 승인 게이트
     wr.write_all("{\"method\":\"message_send\",\"params\":{\"session\":\"s1\",\"text\":\"기록해\"}}\n".as_bytes()).await.unwrap();
     let evs = read_events(&mut reader, "StreamDelta").await;
     assert!(evs.iter().any(|e| matches!(e, Event::ToolStarted { tool, .. } if tool == "fs.write")));
@@ -161,8 +175,8 @@ async fn ask_path_requires_approval_roundtrip() {
     let stream = stream.expect("데몬 소켓 연결 실패");
     let (rd, mut wr) = stream.into_split();
     let mut reader = BufReader::new(rd);
-    wr.write_all(b"{\"method\":\"session_create\",\"params\":{\"id\":\"s1\"}}\n").await.unwrap();
     wr.write_all(b"{\"method\":\"mode_switch\",\"params\":{\"session\":\"s1\",\"to\":\"code\"}}\n").await.unwrap();
+    approve_mode_switch(&mut reader, &mut wr, "s1", Mode::Code).await; // F-03: 데몬 측 승인 게이트
     wr.write_all("{\"method\":\"message_send\",\"params\":{\"session\":\"s1\",\"text\":\"삭제해\"}}\n".as_bytes()).await.unwrap();
 
     let mut evs = vec![];
@@ -223,8 +237,8 @@ async fn approval_after_three_approvals_emits_draft_suggestions() {
     let stream = stream.expect("데몬 소켓 연결 실패");
     let (rd, mut wr) = stream.into_split();
     let mut reader = BufReader::new(rd);
-    wr.write_all(b"{\"method\":\"session_create\",\"params\":{\"id\":\"s1\"}}\n").await.unwrap();
     wr.write_all(b"{\"method\":\"mode_switch\",\"params\":{\"session\":\"s1\",\"to\":\"code\"}}\n").await.unwrap();
+    approve_mode_switch(&mut reader, &mut wr, "s1", Mode::Code).await; // F-03: 데몬 측 승인 게이트
 
     // 승인 3회 — 각 라운드: 배너 수신 → 승인 응답 → 턴 완료 대기
     for _ in 0..3 {
@@ -252,4 +266,125 @@ async fn approval_after_three_approvals_emits_draft_suggestions() {
         }
         _ => unreachable!(),
     }
+}
+
+/// 데몬 접속·session_create까지의 공통 준비 — (reader, writer, 소켓 경로)
+async fn connect(provider: Box<dyn Provider>, root: &std::path::Path) -> (BufReader<tokio::net::unix::OwnedReadHalf>, tokio::net::unix::OwnedWriteHalf) {
+    let paths = Paths { data_dir: root.join("data"), config_dir: root.join("config") };
+    let socket = root.join("d.sock");
+    let d = std::sync::Arc::new(Daemon::new(provider, paths));
+    tokio::spawn(d.clone().serve(socket.clone()));
+    let mut stream = None;
+    for _ in 0..10 {
+        if let Ok(s) = tokio::net::UnixStream::connect(&socket).await { stream = Some(s); break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let stream = stream.expect("데몬 소켓 연결 실패");
+    let (rd, wr) = stream.into_split();
+    (BufReader::new(rd), wr)
+}
+
+#[tokio::test]
+async fn mode_switch_denial_keeps_session_mode_f03() {
+    // F-03 회귀: 모드 전환은 데몬 측 승인 게이트 통과 — 거절 시 ModeChanged 미발행, 세션은 chat 유지.
+    // (거절된 전환 후 fs.write가 code 모드가 아닌 chat 모드로 평가되어 자동 실행되지 않음을 검증)
+    let root = tmp_root("mode_deny");
+    let dir = root.join("work");
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("a.txt");
+    let provider = Scripted {
+        turns: Mutex::new(vec![
+            vec![StreamItem::ToolCall(automaton_core::ToolCall { name: "fs.write".into(), args: json!({"path": &target, "content": "x"}) })],
+            vec![StreamItem::Delta("완료".into())],
+        ]),
+        call: Mutex::new(0),
+    };
+    let (mut reader, mut wr) = connect(Box::new(provider), &root).await;
+    wr.write_all(b"{\"method\":\"session_create\",\"params\":{\"id\":\"s1\"}}\n").await.unwrap();
+    wr.write_all(b"{\"method\":\"mode_switch\",\"params\":{\"session\":\"s1\",\"to\":\"code\"}}\n").await.unwrap();
+
+    let evs = read_events(&mut reader, "ApprovalRequested").await;
+    let approval = evs.iter().find_map(|e| match e {
+        Event::ApprovalRequested { approval, action, .. } if action.tool == "mode.switch" => Some(approval.clone()),
+        _ => None,
+    }).expect("모드 전환 승인 요청 미수신");
+    assert!(!evs.iter().any(|e| matches!(e, Event::ModeChanged { mode: Mode::Code, .. })), "승인 전 모드 적용은 결함");
+
+    wr.write_all(format!("{{\"method\":\"approval_respond\",\"params\":{{\"session\":\"s1\",\"approval\":\"{approval}\",\"decision\":\"deny\",\"always\":false}}}}\n").as_bytes()).await.unwrap();
+    let evs = read_events(&mut reader, "Error").await;
+    assert!(evs.iter().any(|e| matches!(e, Event::Error { message, .. } if message.contains("모드 전환 거절"))), "거절 응답 이벤트 미수신: {evs:?}");
+
+    // 세션이 여전히 chat이라 fs.write는 자동 실행되지 않고 승인 배너로 전환됨
+    wr.write_all("{\"method\":\"message_send\",\"params\":{\"session\":\"s1\",\"text\":\"기록해\"}}\n".as_bytes()).await.unwrap();
+    let evs = read_events(&mut reader, "ApprovalRequested").await;
+    assert!(evs.iter().any(|e| matches!(e, Event::ApprovalRequested { action, .. } if action.tool == "fs.write")), "chat 유지 시 fs.write는 ASK여야 함: {evs:?}");
+    assert!(!target.exists(), "거절된 모드 전환 후 파일이 자동 기록되면 결함");
+}
+
+#[tokio::test]
+async fn approval_response_from_other_session_rejected_f03() {
+    // F-03 회귀: 승인 id는 발행 세션에 귀속 — 타 세션 명의의 응답은 거부되고
+    // 정당한 세션의 재응답으로만 waiter가 해제된다.
+    let root = tmp_root("session_bind");
+    let dir = root.join("work");
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("to_delete.txt");
+    std::fs::write(&target, "delete me").unwrap();
+    let provider = Scripted {
+        turns: Mutex::new(vec![
+            vec![StreamItem::ToolCall(automaton_core::ToolCall { name: "fs.delete".into(), args: json!({"path": &target}) })],
+            vec![StreamItem::Delta("삭제 완료".into())],
+        ]),
+        call: Mutex::new(0),
+    };
+    let (mut reader, mut wr) = connect(Box::new(provider), &root).await;
+    wr.write_all(b"{\"method\":\"session_create\",\"params\":{\"id\":\"s1\"}}\n").await.unwrap();
+    wr.write_all(b"{\"method\":\"mode_switch\",\"params\":{\"session\":\"s1\",\"to\":\"code\"}}\n").await.unwrap();
+    approve_mode_switch(&mut reader, &mut wr, "s1", Mode::Code).await;
+    wr.write_all("{\"method\":\"message_send\",\"params\":{\"session\":\"s1\",\"text\":\"삭제해\"}}\n".as_bytes()).await.unwrap();
+
+    let evs = read_events(&mut reader, "ApprovalRequested").await;
+    let approval = evs.iter().find_map(|e| match e {
+        Event::ApprovalRequested { approval, action, .. } if action.tool == "fs.delete" => Some(approval.clone()),
+        _ => None,
+    }).expect("fs.delete 승인 요청 미수신");
+
+    // 공격자 시나리오: 타 세션(s2) 명의로 s1의 승인 id에 응답 → 거부, waiter 미해제
+    wr.write_all(format!("{{\"method\":\"approval_respond\",\"params\":{{\"session\":\"s2\",\"approval\":\"{approval}\",\"decision\":\"approve\",\"always\":true}}}}\n").as_bytes()).await.unwrap();
+    let evs = read_events(&mut reader, "Error").await;
+    assert!(evs.iter().any(|e| matches!(e, Event::Error { message, .. } if message.contains("세션"))), "세션 바인딩 위반 오류 미수신: {evs:?}");
+    assert!(target.exists(), "타 세션 응답으로 실행되면 결함");
+
+    // 정당한 세션의 응답으로만 실행된다
+    wr.write_all(format!("{{\"method\":\"approval_respond\",\"params\":{{\"session\":\"s1\",\"approval\":\"{approval}\",\"decision\":\"approve\",\"always\":false}}}}\n").as_bytes()).await.unwrap();
+    let evs = read_events(&mut reader, "StreamDelta").await;
+    assert!(evs.iter().any(|e| matches!(e, Event::ToolStarted { tool, .. } if tool == "fs.delete")));
+    assert!(!target.exists(), "정당 응답 후에만 삭제");
+}
+
+#[tokio::test]
+async fn session_gate_keys_waiters_by_session_and_tool_f05() {
+    // F-05 회귀: waiter 키는 "{session}:{tool}" — 동일 툴이라도 세션이 다르면 독립 등록되고,
+    // 한 세션의 승인이 타 세션 waiter를 해제하지 않는다. 동일 키 중복 ASK는 즉시 거부.
+    use automaton_core::{ApprovalGate, ApprovalOutcome};
+    use automaton_proto::{ActionInfo, Decision};
+    use automatond::daemon::SessionGate;
+    use std::sync::Arc;
+
+    let info = || ActionInfo { tool: "shell.exec".into(), target: String::new(), risk: String::new() };
+    let gate = Arc::new(SessionGate::new());
+    let (g1, g2, g3) = (gate.clone(), gate.clone(), gate.clone());
+    let a = tokio::spawn(async move { g1.decide("s1", info()).await });
+    let b = tokio::spawn(async move { g2.decide("s2", info()).await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await; // 첫 폴(등록) 완료 보장
+
+    assert_eq!(gate.pending.lock().len(), 2, "세션별 독립 waiter 등록");
+    let dup = tokio::spawn(async move { g3.decide("s1", info()).await }); // 동일 (세션,툴) 중복
+    assert!(matches!(dup.await.unwrap(), ApprovalOutcome::Deny), "중복 ASK는 덮어쓰지 않고 즉시 거부");
+
+    // s1 승인이 s2 waiter를 건드리지 않는다
+    gate.pending.lock().remove("s1:shell.exec").unwrap().send(Decision::Approve).unwrap();
+    assert!(matches!(a.await.unwrap(), ApprovalOutcome::Approve));
+    assert!(gate.pending.lock().contains_key("s2:shell.exec"), "타 세션 waiter 잔존");
+    drop(b); // 미응답 waiter 정리
 }

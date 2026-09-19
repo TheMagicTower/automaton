@@ -32,11 +32,26 @@ fn destructive_and_external_actions_always_ask() {
 #[test]
 fn input_defaults_to_ask_even_in_mac_mode_until_granted() {
     // 스펙 §5: 미등록 앱 클릭·타이핑 → ASK. 등록(=grant_always) 이후에만 Allow.
+    // F-04 반영: Allow 판정은 target을 자기선언한 입력에만 성립 — target 미포함 회귀는 별도 테스트.
     let mut e = Engine::builtin();
-    let a = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.apple.finder".into()), target: None };
+    let a = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.apple.finder".into()), target: Some("search field".into()) };
     assert!(matches!(e.evaluate(&a, Mode::Mac), Verdict::Ask { .. }));
     e.grant_always(Rule { name: "finder-input".into(), tool: Some("input.type".into()), app: Some("com.apple.finder".into()), category: None, verdict: VerdictTemplate::Allow });
     assert!(matches!(e.evaluate(&a, Mode::Mac), Verdict::Allow));
+}
+
+#[test]
+fn input_without_target_never_allows_even_when_granted_f04() {
+    // F-04 회귀: target 미포함 input.*은 granted 규칙보다 우선하는 항상 ASK —
+    // 소유자가 앱 입력을 '항상 허용'으로 등록해도 자기선언 누락 호출은 자동 Allow 불가.
+    let mut e = Engine::builtin();
+    e.grant_always(Rule { name: "finder-input".into(), tool: Some("input.type".into()), app: Some("com.apple.finder".into()), category: None, verdict: VerdictTemplate::Allow });
+    for category in [Category::Input, Category::External] { // 툴 분류와 무관하게 정책이 최종 방어
+        let a = Action { tool: "input.type".into(), category, app: Some("com.apple.finder".into()), target: None };
+        for mode in [Mode::Code, Mode::Mac, Mode::Chat] {
+            assert!(matches!(e.evaluate(&a, mode), Verdict::Ask { .. }), "target 미포함 input은 granted로도 Allow 불가 ({category:?}/{mode:?})");
+        }
+    }
 }
 
 #[test]
@@ -66,12 +81,12 @@ fn wildcard_app_grant_does_not_override_deny_app_rules() {
     // input.type 툴 전체에 대해 app: None으로 일반 허용 등록
     e.grant_always(Rule { name: "grant-all-input".into(), tool: Some("input.type".into()), app: None, category: None, verdict: VerdictTemplate::Allow });
     
-    // 일반 앱은 허용됨
-    let normal = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.example.app".into()), target: None };
+    // 일반 앱은 허용됨 (F-04 이후 Allow는 target 자기선언이 있는 입력에만 성립)
+    let normal = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.example.app".into()), target: Some("search field".into()) };
     assert!(matches!(e.evaluate(&normal, Mode::Mac), Verdict::Allow));
 
     // 하지만 금지 앱(com.some.bank)은 여전히 DENY되어야 함 (일반 와일드카드 그랜트로 뚫리지 않음)
-    let bank = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.some.bank".into()), target: None };
+    let bank = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.some.bank".into()), target: Some("search field".into()) };
     assert!(matches!(e.evaluate(&bank, Mode::Mac), Verdict::Deny { .. }));
 }
 
@@ -81,7 +96,7 @@ fn deny_takes_precedence_over_allow_regardless_of_order() {
         Rule { name: "allow-all-input".into(), tool: Some("input.type".into()), app: None, category: None, verdict: VerdictTemplate::Allow },
         Rule { name: "deny-example".into(), tool: None, app: Some("com.example.app".into()), category: None, verdict: VerdictTemplate::Deny },
     ]);
-    let a = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.example.app".into()), target: None };
+    let a = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.example.app".into()), target: Some("search field".into()) };
     assert!(matches!(e.evaluate(&a, Mode::Mac), Verdict::Deny { .. }));
 }
 
@@ -99,10 +114,10 @@ fn mode_switch_always_asks_even_when_granted() {
 fn owner_grant_overrides_builtin_deny_app_but_never_password_fields() {
     // 스펙 §5: 민감 영역은 소유자가 명시적으로 등록(화이트리스트)한 경우에만 허용.
     let mut e = Engine::builtin();
-    let bank = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.some.bank".into()), target: None };
+    let bank = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.some.bank".into()), target: Some("search field".into()) };
     assert!(matches!(e.evaluate(&bank, Mode::Mac), Verdict::Deny { .. })); // builtin deny-app 규칙
     e.grant_always(Rule { name: "owner-trusts-bank".into(), tool: Some("input.type".into()), app: Some("com.some.bank".into()), category: None, verdict: VerdictTemplate::Allow });
-    assert!(matches!(e.evaluate(&bank, Mode::Mac), Verdict::Allow)); // 명시 등록 → 허용
+    assert!(matches!(e.evaluate(&bank, Mode::Mac), Verdict::Allow)); // 명시 등록 → 허용 (target 선언된 입력)
     let pw = Action { tool: "input.type".into(), category: Category::Input, app: Some("com.some.bank".into()), target: Some("SecureTextField".into()) };
     assert!(matches!(e.evaluate(&pw, Mode::Mac), Verdict::Deny { .. })); // 비밀번호 필드는 절대 불가
 }

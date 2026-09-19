@@ -6,8 +6,18 @@ use serde_json::json;
 fn mac_tool_categories_match_spec() {
     assert_eq!(CaptureScreen.category(&json!({})), Category::Read);
     assert_eq!(AxRead.category(&json!({})), Category::Read);
-    assert_eq!(InputClick.category(&json!({"x": 1, "y": 2})), Category::Input);
-    assert_eq!(InputType.category(&json!({"text": "hi"})), Category::Input);
+    assert_eq!(InputClick.category(&json!({"x": 1, "y": 2, "target": "button 'OK'"})), Category::Input);
+    assert_eq!(InputType.category(&json!({"text": "hi", "target": "search field"})), Category::Input);
+}
+
+#[test]
+fn input_tools_without_target_classify_external_f04() {
+    // F-04 회귀: target은 모델 자기선언 — 누락·빈 값이면 민감 필드(SecureTextField) 검사가
+    // 우회되므로 Input이 아닌 External(항상 ASK)로 분류.
+    assert_eq!(InputClick.category(&json!({"x": 1, "y": 2})), Category::External);
+    assert_eq!(InputType.category(&json!({"text": "hi"})), Category::External);
+    assert_eq!(InputType.category(&json!({"text": "hi", "target": "   "})), Category::External);
+    assert_eq!(InputClick.category(&json!({"x": 1, "y": 2, "target": 42})), Category::External); // 비문자열 target
 }
 
 #[test]

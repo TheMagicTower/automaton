@@ -85,6 +85,7 @@ impl Engine {
 
     /// 결정론적 평가 순서:
     /// 1) 비밀번호 필드 → 정적 DENY (그 무엇도 우회 불가)
+    /// 1.5) 입력 툴 target 미포함 → 항상 ASK (granted로도 우회 불가, F-04)
     /// 2) 모드 전환 → 항상 ASK (granted로도 우회 불가 — §5 원천 차단)
     /// 3) 소유자 명시 granted → Allow (§5 민감 영역 명시 등록 = 화이트리스트)
     /// 4) 명시 DENY 규칙 (규칙 목록 내 Allow보다 항상 우선)
@@ -108,6 +109,11 @@ impl Engine {
             if is_sensitive {
                 return Verdict::Deny { reason: format!("민감 입력 필드: {t}") };
             }
+        }
+        // 1.5 입력 툴 target 미포함 (F-04) — target은 모델 자기선언이라 누락 시 민감 필드 검사가
+        // 우회된다. 어떤 granted·규칙으로도 Allow 불가, 항상 ASK.
+        if a.tool.starts_with("input.") && a.target.as_deref().map_or(true, |t| t.trim().is_empty()) {
+            return Verdict::Ask { reason: format!("{} target 미포함 — 민감 필드 검사 불가", short(a)) };
         }
         // 2. 모드 전환은 언제나 승인 — 소유자 granted로도 우회 불가 (§5 원천 차단)
         if a.category == Category::ModeSwitch {

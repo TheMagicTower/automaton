@@ -72,7 +72,14 @@ impl Tool for InputClick {
     fn parameters_schema(&self) -> Value {
         serde_json::json!({"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"app":{"type":"string"},"target":{"type":"string","description":"대상 UI 요소의 역할/이름(예: button 'Delete', SecureTextField). 민감 입력 필드 식별에 필수"}},"required":["x","y"]})
     }
-    fn category(&self, _args: &Value) -> Category { Category::Input }
+    fn category(&self, args: &Value) -> Category {
+        // F-04: target은 모델 자기선언 — 누락하면 민감 필드(SecureTextField) 검사 자체가 생략된다.
+        // target이 있을 때만 Input, 없으면 External(항상 ASK).
+        args.get("target").and_then(|v| v.as_str())
+            .filter(|t| !t.trim().is_empty())
+            .map(|_| Category::Input)
+            .unwrap_or(Category::External)
+    }
     fn execute(&self, args: &Value) -> Result<String, ToolError> {
         let x = args.get("x").and_then(|v| v.as_f64()).ok_or_else(|| ToolError::Message("x 인자 누락".into()))?;
         let y = args.get("y").and_then(|v| v.as_f64()).ok_or_else(|| ToolError::Message("y 인자 누락".into()))?;
@@ -96,7 +103,14 @@ impl Tool for InputType {
     fn parameters_schema(&self) -> Value {
         serde_json::json!({"type":"object","properties":{"text":{"type":"string"},"app":{"type":"string"},"target":{"type":"string","description":"대상 UI 요소의 역할/이름(예: SecureTextField, Password). 민감 입력 필드 식별에 필수"}},"required":["text"]})
     }
-    fn category(&self, _args: &Value) -> Category { Category::Input }
+    fn category(&self, args: &Value) -> Category {
+        // F-04: target은 모델 자기선언 — 누락하면 민감 필드(SecureTextField) 검사 자체가 생략된다.
+        // target이 있을 때만 Input, 없으면 External(항상 ASK).
+        args.get("target").and_then(|v| v.as_str())
+            .filter(|t| !t.trim().is_empty())
+            .map(|_| Category::Input)
+            .unwrap_or(Category::External)
+    }
     fn execute(&self, args: &Value) -> Result<String, ToolError> {
         let text = args.get("text").and_then(|v| v.as_str()).ok_or_else(|| ToolError::Message("text 인자 누락".into()))?;
         // 1) 클립보드에 텍스트 적재
