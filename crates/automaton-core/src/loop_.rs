@@ -1,10 +1,11 @@
 //! 에이전트 루프 (§4·§9) — 스트리밍→툴콜→Policy→실행→결과 환류. 감사 로그 훅은 Chunk 4.
 
 use crate::mode::ModeProfile;
-use crate::provider::{CompletionRequest, CoreError, Message, Provider, StreamItem, ToolCall};
+use crate::provider::{CompletionRequest, CoreError, Message, Provider, ProviderStream, StreamItem, ToolCall};
 use automaton_policy::{Action, Engine, Verdict};
 use automaton_proto::{ActionInfo, Event, Mode};
 use automaton_tools::{action_context, Registry, Tool};
+use futures_util::StreamExt;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,13 +64,15 @@ impl<P: Provider, G: ApprovalGate> AgentLoop<P, G> {
         let mut consecutive_failures: usize = 0; // §9: 동일 툴 연속 실패 중단의 루프 수준 근사
         for _ in 0..MAX_TURNS {
             let req = self.build_request(history);
-            let items = self.provider.complete(req).await?;
+            // 청크 스트리밍 — 델타는 도착 즉시 emit (버퍼링 완성 대비 지연 제거)
+            let mut stream: ProviderStream = self.provider.complete_stream(req).await?;
             let mut assistant = String::new();
             let mut calls = vec![];
-            for it in items {
-                match it {
+            while let Some(item) = stream.next().await {
+                match item? {
                     StreamItem::Delta(d) => { emit(Event::StreamDelta { session: session.clone(), delta: d.clone() }); assistant.push_str(&d); }
                     StreamItem::ToolCall(c) => calls.push(c),
+                    StreamItem::Usage(u) => emit(Event::Usage { session: session.clone(), usage: u }),
                 }
             }
             history.push(Message { role: "assistant".into(), content: assistant });
@@ -89,7 +92,7 @@ impl<P: Provider, G: ApprovalGate> AgentLoop<P, G> {
 
     fn build_request(&self, history: &[Message]) -> CompletionRequest {
         let tools = self.profile.tools.iter().filter_map(|n| self.registry.get(n)).map(|t| (t.name().to_string(), t.description().to_string(), t.parameters_schema())).collect();
-        CompletionRequest { system: self.profile.system_prompt.clone(), messages: history.to_vec(), tools }
+        CompletionRequest { system: self.profile.system_prompt.clone(), messages: history.to_vec(), tools, track_usage: true }
     }
 
     async fn run_tool_call(&self, session: &str, call: &ToolCall, history: &mut Vec<Message>, emit: &mut (dyn FnMut(Event) + Send)) -> Result<(), CoreError> {

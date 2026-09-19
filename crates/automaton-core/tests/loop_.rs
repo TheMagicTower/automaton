@@ -41,9 +41,20 @@ async fn run(provider: Box<dyn Provider>, gate: Box<dyn ApprovalGate>, user: &st
 #[tokio::test]
 async fn text_only_turn_streams_deltas() {
     let p = Scripted { turns: Mutex::new(vec![vec![StreamItem::Delta("안녕".into()), StreamItem::Delta("하세요".into())]]), call: Mutex::new(0) };
+
     let ev = run(Box::new(p), Box::new(AutoGate(ApprovalOutcome::Approve)), "인사해줘").await;
     assert!(ev.iter().filter(|e| matches!(e, Event::StreamDelta { .. })).count() >= 2);
     assert!(!ev.iter().any(|e| matches!(e, Event::ToolStarted { .. })));
+}
+
+#[tokio::test]
+async fn usage_item_emits_usage_event_and_not_history() {
+    let p = Scripted { turns: Mutex::new(vec![vec![
+        StreamItem::Delta("답".into()),
+        StreamItem::Usage(automaton_proto::TokenUsage { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 }),
+    ]]), call: Mutex::new(0) };
+    let evs = run(Box::new(p), Box::new(AutoGate(ApprovalOutcome::Approve)), "질문").await;
+    assert!(evs.iter().any(|e| matches!(e, Event::Usage { usage, .. } if usage.total_tokens == 10)));
 }
 
 #[tokio::test]

@@ -1,6 +1,6 @@
 //! automaton-memory — 단일 SQLite 스토어: 세션·요약·사실·결정 (§7 메모리 3계층)
 
-use automaton_core::Message;
+use automaton_proto::Message;
 use rusqlite::{Connection, Row};
 
 #[derive(Debug, thiserror::Error)]

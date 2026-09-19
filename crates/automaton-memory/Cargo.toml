@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-automaton-core = { path = "../automaton-core" }
+automaton-proto = { path = "../automaton-proto" }
 rusqlite.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true

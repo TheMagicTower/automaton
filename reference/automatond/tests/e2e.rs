@@ -96,6 +96,46 @@ async fn allow_path_runs_tool_streams_and_audits() {
 }
 
 #[tokio::test]
+async fn usage_reported_and_written_to_audit_log() {
+    let root = tmp_root("usage");
+    let paths = Paths { data_dir: root.join("data"), config_dir: root.join("config") };
+    let provider = Scripted {
+        turns: Mutex::new(vec![vec![
+            StreamItem::Delta("완료".into()),
+            StreamItem::Usage(automaton_proto::TokenUsage { prompt_tokens: 11, completion_tokens: 4, total_tokens: 15 }),
+        ]]),
+        call: Mutex::new(0),
+    };
+    let socket = root.join("d.sock");
+    let d = std::sync::Arc::new(Daemon::new(Box::new(provider), paths));
+    tokio::spawn(d.clone().serve(socket.clone()));
+    let mut stream = None;
+    for _ in 0..10 {
+        if let Ok(s) = tokio::net::UnixStream::connect(&socket).await { stream = Some(s); break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let stream = stream.expect("데몬 소켓 연결 실패");
+    let (rd, mut wr) = stream.into_split();
+    let mut reader = BufReader::new(rd);
+    wr.write_all(b"{\"method\":\"session_create\",\"params\":{\"id\":\"s1\"}}\n").await.unwrap();
+    wr.write_all("{\"method\":\"message_send\",\"params\":{\"session\":\"s1\",\"text\":\"안녕\"}}\n".as_bytes()).await.unwrap();
+    // Usage 이벤트가 소켓으로 도착 — 세션당 API 사용량 리포트
+    let evs = read_events(&mut reader, "Usage").await;
+    assert!(evs.iter().any(|e| matches!(e, Event::Usage { usage, .. } if usage.total_tokens == 15)));
+
+    // writer_loop 감사 기록 — 이벤트 비동기 flush이므로 짧은 재시도로 단언
+    let audit_path = root.join("data/audit/s1.jsonl");
+    let mut audited = false;
+    for _ in 0..20 {
+        if let Ok(a) = std::fs::read_to_string(&audit_path) {
+            if a.contains("\"type\":\"usage\"") && a.contains("\"total_tokens\":15") { audited = true; break; }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(audited, "감사 로그에 usage 미기록: {}", audit_path.display());
+}
+
+#[tokio::test]
 async fn ask_path_requires_approval_roundtrip() {
     let root = tmp_root("approval");
     let paths = Paths { data_dir: root.join("data"), config_dir: root.join("config") };

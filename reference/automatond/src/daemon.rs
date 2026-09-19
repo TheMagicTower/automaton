@@ -137,6 +137,18 @@ impl Daemon {
                     let tx = tx.clone();
                     tokio::spawn(async move { d.run_session(&session, &text, tx).await });
                 }
+                Request::HistoryGet { session, limit } => {
+                    // 세션 이력 반환 — 최근 limit개 메시지를 단일 델타로 전송 (시간순)
+                    let msgs = self.store.messages(&session).unwrap_or_default();
+                    let start = msgs.len().saturating_sub(limit);
+                    let text = msgs[start..].iter()
+                        .map(|m| if m.role == "user" { format!("▸ {}", m.content) } else { m.content.clone() })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !text.is_empty() {
+                        let _ = tx.send(Event::StreamDelta { session: session.clone(), delta: text });
+                    }
+                }
                 Request::SessionList => {
                     // M1 미구현 — 무음 드롭 금지, 명시적 오류 응답
                     let _ = tx.send(Event::Error { session: None, message: "SessionList는 M1 미구현".into() });
@@ -181,33 +193,120 @@ impl Daemon {
         let mode = *self.sessions.lock().get(session).unwrap_or(&Mode::Chat);
         let registry = match mode { Mode::Mac => automaton_tools::Registry::mac_set(), _ => automaton_tools::Registry::coding_set() };
         let engine = self.engine.lock().clone();
-        // &dyn Provider 전달 — Chunk 2의 &P 포워딩 구현 사용 (Box 소유권 유지, 실측 E0277 반영)
-        let loop_ = AgentLoop::new(&*self.provider, self.gate.clone(), engine, registry, mode);
+
+        // 시스템 프롬프트: 세션당 안정(캐시 프리픽스 보존) — 사용자 텍스트로 변하지 않음
+        let composed_prompt = self.stable_system_prompt(mode);
+        let base_profile = automaton_core::ModeProfile::builtin(mode);
+        let profile = automaton_core::ModeProfile {
+            mode,
+            tools: base_profile.tools,
+            system_prompt: composed_prompt,
+        };
+        let loop_ = AgentLoop::with_profile(&*self.provider, self.gate.clone(), engine, registry, profile);
+
         let mut history = self.store.messages(session).unwrap_or_default();
-        let d = self.clone(); // 3단계 초안 발행용 Arc 사본 — emit 클로저로 이동
+
+        // 관련 기억을 히스토리 끝(현재 사용자 메시지 직전)에 주입 — 캐시 프리픽스 최소 교란
+        // 시스템 프롬프트+기존 히스토리는 그대로 → API 프리픽스 캐시 히트
+        let fact_block = self.relevant_facts(text);
+        if !fact_block.is_empty() {
+            history.push(automaton_core::Message {
+                role: "system".into(),
+                content: fact_block,
+            });
+        }
+
+        let d = self.clone();
         let mut emit = move |e: Event| {
             let _ = tx.send(e.clone());
-            // 3단계(§6) — 승인 배너 직후 답변 초안 발행. 같은 채널로 직렬화되어
-            // ApprovalRequested → DraftSuggestions 순서가 보장된다. 초안은 칩일 뿐 승인 아님.
             if let Event::ApprovalRequested { ref session, ref action, .. } = e {
                 let drafts = d.apprentice.drafts_for(action).unwrap_or_default();
                 if !drafts.is_empty() {
                     let _ = tx.send(Event::DraftSuggestions { session: session.clone(), suggestions: drafts });
                 }
             }
-        }; // Send 클로저 — run_turn의 + Send 바운드 충족(실측 반영)
-        let prior = history.len(); // 신규 분절만 저장 — 기존 재기록 시 매 턴 중복 증식(실측 결함)
+        };
+        let prior = history.len();
         if let Err(e) = loop_.run_turn(session, &mut history, text.to_string(), &mut emit).await {
-            let _ = emit(Event::Error { session: Some(session.to_string()), message: format!("턴 실패: {e}") }); // 침묵 끊김 방지 (리뷰 자문)
+            let _ = emit(Event::Error { session: Some(session.to_string()), message: format!("턴 실패: {e}") });
         }
-        for m in &history[prior..] { let _ = self.store.append_message(session, &m.role, &m.content); }
+
+        // 턴 종료 후: 메모리 추출 + 신규 분절만 저장 (주입한 system 메시지는 제외)
+        self.extract_and_save_memories(&history[prior..]);
+        for m in &history[prior..] {
+            if m.role != "system" { // 주입한 사실 블록은 재주입 방지 위해 미저장
+                let _ = self.store.append_message(session, &m.role, &m.content);
+            }
+        }
+    }
+
+    /// 안정 시스템 프롬프트 — 세션 수명 동안 불변(캐시 프리픽스 보존)
+    fn stable_system_prompt(&self, mode: Mode) -> String {
+        let persona = self.load_persona();
+        let base = automaton_core::ModeProfile::builtin(mode);
+        let mut prompt = format!("{}", persona);
+        prompt.push_str(&format!("\n{}", base.system_prompt));
+        prompt.push_str("\n\n## 기억 지침\n- 사용자에 대해 알게 된 새로운 사실(선호, 이름, 프로젝트, 습관 등)은 [기억: 내용] 형태로 응답에 포함하세요. 자동으로 저장됩니다.\n- 이미 아는 내용은 반복해서 저장하지 마세요.");
+        prompt
+    }
+
+    /// 사용자 텍스트 기반 관련 기억 검색 → 히스토리 끝에 주입할 블록 조합
+    fn relevant_facts(&self, user_text: &str) -> String {
+        let keywords: Vec<String> = user_text.split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty() && t.len() > 1)
+            .map(|t| t.to_lowercase())
+            .take(5)
+            .collect();
+        if keywords.is_empty() { return String::new(); }
+        let query = keywords.join(" ");
+        let facts = self.store.search_facts(&query).unwrap_or_default();
+        if facts.is_empty() { return String::new(); }
+        let mut block = String::from("## 사용자에 대해 알고 있는 것\n");
+        for f in facts.iter().take(5) {
+            block.push_str(&format!("- {}\n", f));
+        }
+        block
+    }
+
+    /// 페르소나 파일 로드 — 없으면 기본 생성
+    fn load_persona(&self) -> String {
+        let path = self.paths.config_dir.join("persona.md");
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if !content.trim().is_empty() { return content; }
+        }
+        let default = "# automaton 성격\n\n너는 caspar의 개인 비서 automaton이다. 황동과 월넛으로 만들어진 스팀펑크 기계 장치로, 정확하고 신속하게 일을 처리한다.\n\n## 성격\n- 존댓말 사용, 간결하고 실용적\n- 능동적으로 제안하되 사용자 결정 존중\n- 도구 사용 결과를 근거로 보고 — 추측으로 답하지 않음\n\n## 사용자 기억\n- 대화에서 알게 된 사용자 정보는 [기억: 내용] 마커로 출력해 자동 저장\n- 저장된 기억은 다음 대화에서 자동으로 참조됨\n";
+        let _ = std::fs::create_dir_all(&self.paths.config_dir);
+        let _ = std::fs::write(&path, default);
+        default.to_string()
+    }
+
+    /// 어시스턴트 출력에서 [기억: ...] 마커 추출하여 facts_fts에 저장
+    fn extract_and_save_memories(&self, new_messages: &[automaton_core::Message]) {
+        for msg in new_messages {
+            if msg.role != "assistant" { continue; }
+            let mut rest = msg.content.as_str();
+            while let Some(start) = rest.find("[기억:") {
+                let marker_len = "[기억:".len(); // UTF-8 바이트 길이 — 4가 아니라 8
+                let after = &rest[start + marker_len..];
+                if let Some(end) = after.find(']') {
+                    let fact = after[..end].trim();
+                    if !fact.is_empty() {
+                        let _ = self.store.add_fact(fact);
+                    }
+                    rest = &after[end + 1..];
+                } else {
+                    break;
+                }
+            }
+        }
     }
 }
 
 fn session_of(ev: &Event) -> Option<String> {
     match ev {
         Event::StreamDelta { session, .. } | Event::ToolStarted { session, .. } | Event::ToolResult { session, .. }
-        | Event::ApprovalRequested { session, .. } | Event::DraftSuggestions { session, .. } | Event::ModeChanged { session, .. } => Some(session.clone()),
+        | Event::ApprovalRequested { session, .. } | Event::DraftSuggestions { session, .. } | Event::Usage { session, .. }
+        | Event::ModeChanged { session, .. } => Some(session.clone()),
         Event::Error { session, .. } => session.clone(),
     }
 }
