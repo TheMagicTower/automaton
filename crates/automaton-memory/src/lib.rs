@@ -99,6 +99,16 @@ impl MemoryStore {
         }))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
+
+    /// 툴별 결정 이력 전체 조회 — tool 칼럼은 UNINDEXED라 FTS MATCH로 못 얻음.
+    pub fn decisions_by_tool(&self, tool: &str) -> Result<Vec<Decision>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT session, tool, target, verdict, decision FROM decisions_fts WHERE tool = ?1")?;
+        let rows = stmt.query_map([tool], |r: &Row| Ok(Decision {
+            session: r.get(0)?, tool: r.get(1)?, target: r.get(2)?, verdict: r.get(3)?, decision: r.get(4)?,
+        }))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
 }
 
 /// FTS5 MATCH 이스케이프: 각 토큰을 `"..."*` 인용 접두 형태로 — 내부 `"`는 `""` doubling.
