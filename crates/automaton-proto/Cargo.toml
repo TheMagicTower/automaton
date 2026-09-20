@@ -3,6 +3,7 @@ name = "automaton-proto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "JSON-RPC wire protocol types for automaton"
 repository.workspace = true
 
 [dependencies]
