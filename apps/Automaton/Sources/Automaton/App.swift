@@ -328,7 +328,7 @@ struct ShellView: View {
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 8) { // LazyVStack 금지 — NSHostingView(창 모드)에서 스크롤 크래시 유발
                     if model.stream.isEmpty && !model.isThinking { emptyState }
                     ForEach(model.stream) { entry in
                         ChatBubble(entry: entry)
