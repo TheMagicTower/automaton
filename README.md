@@ -1,117 +1,157 @@
-# automaton ⚙️
+# automaton ⚙
 
-> **A modular macOS GUI & coding agent framework in Rust & SwiftUI.**
+**A steampunk-flavored personal GUI agent for macOS.** Built in Rust with a SwiftUI Brass & Glass shell.
 
-`automaton` is a local-first, on-device AI agent platform built for macOS (Apple Silicon). It bridges coding tasks in your terminal with direct GUI automation across native Mac applications, governed by a deterministic, security-hardened permission policy engine.
+> Your assistant, on your machine. Your data stays local.
 
----
+## What it does
 
-## Highlights
+automaton is a personal AI agent that lives in your macOS menu bar. It can:
 
-- **Dual-Track Architecture**: Pure library crates published as an open-source framework, designed to be imported and assembled into custom, private personal harnesses.
-- **Tri-Mode Operation**:
-  - `code`: Autonomous engineering tools (filesystem, grep, edit, safe shell execution).
-  - `mac`: Careful desktop manipulation via ScreenCaptureKit, Accessibility (AX), and CGEvent mouse/keyboard injection.
-  - `chat`: Read-only conversational partner.
-- **Deterministic Policy Engine**: Strict 6-stage security evaluation guaranteeing that sensitive input fields (passwords, credentials) cannot be accessed, mode escalations require confirmation, and shell execution is strictly gated against command injection and flag bypasses.
-- **On-Device Learning (Apprentice Engine Phase 1)**: SQLite + FTS5 decision journaling with sub-linear token-overlap ranking that surfaces intelligent past-decision hints in approval dialogs without telemetry.
-- **Steampunk Aesthetic (Brass & Glass)**: Native SwiftUI menu bar popover styled in dark walnut, brushed brass, and gold typography.
+- 💬 **Chat** — answer questions, analyze files, run diagnostics
+- ⚙️ **Code** — read, write, edit files; run builds; manage projects
+- 🔭 **Mac** — capture screens, read UI elements, click and type
 
----
-
-## Architecture
-
-```
-SwiftUI Shell (apps/Automaton)
-  Conversation stream · Mode switcher · Approval banner with hints · ndjson UDS client
-        ↕ JSON-RPC over Unix domain socket (~/.local/share/automaton/automatond.sock)
-automaton core (reference/automatond or your custom binary)
-  ├─ automaton-proto      JSON-RPC requests, events, and contract types
-  ├─ automaton-policy     Deterministic ALLOW / ASK / DENY policy engine
-  ├─ automaton-tools      Tool trait, registry, coding tools, shell classifier, mac tools
-  ├─ automaton-memory     SQLite store (WAL, FTS5 facts & decisions) + agentskills.io loader
-  ├─ automaton-apprentice Decision journal & similarity hint provider
-  └─ automaton-core       Provider abstraction (OpenAI-compatible / scripted), agent loop, mode profiles
-        ↕ macOS APIs
-Accessibility API (AXUIElement) · ScreenCaptureKit · CoreGraphics (CGEvent)
-```
-
----
-
-## Crates
-
-| Crate | Description |
-|---|---|
-| [`automaton-proto`](crates/automaton-proto) | Wire contract types for JSON-RPC requests, streaming events, and approval dialogs. |
-| [`automaton-policy`](crates/automaton-policy) | Deterministic rule engine enforcing fail-closed permission evaluation. |
-| [`automaton-tools`](crates/automaton-tools) | Tool trait, registry, filesystem/edit tools, shell metacharacter defense, and macOS CGEvent/AX tools. |
-| [`automaton-memory`](crates/automaton-memory) | SQLite persistence with WAL mode, FTS5 virtual tables, and progressive markdown skill indexing. |
-| [`automaton-apprentice`](crates/automaton-apprentice) | Local decision learning loop and similarity hint provider. |
-| [`automaton-core`](crates/automaton-core) | Multi-turn agent loop, provider abstraction, and mode profiles. |
-| [`automatond`](reference/automatond) | Reference daemon providing the UDS ndjson server, doctor diagnostics, and session management. |
-| [`Automaton`](apps/Automaton) | Native macOS SwiftUI menu bar application featuring the Brass & Glass theme. |
-
----
+All three modes share the same toolset. Safety is enforced by a deterministic policy engine, not by hiding tools.
 
 ## Quick Start
 
 ### Prerequisites
 
-- macOS 14.0+ (Apple Silicon recommended)
-- Rust 1.90+ (`cargo`)
-- Swift 6.0+ (`swift`) and Xcode Command Line Tools
+- macOS 14+ (Apple Silicon)
+- Rust 1.75+ (`rustup`)
+- Xcode Command Line Tools
+- An OpenAI-compatible API key (e.g., [Z.AI](https://z.ai))
 
-### Build & Run Tests
+### Build & Run
 
 ```bash
-# Clone the repository
 git clone https://github.com/TheMagicTower/automaton.git
 cd automaton
 
-# Run the complete Rust test suite (58+ tests)
-cargo test --workspace
+# Start the daemon
+export AUTOMATON_API_KEY="your-key"
+export AUTOMATON_BASE_URL="https://api.z.ai/api/coding/paas/v4"
+export AUTOMATON_MODEL="glm-4.6"
+cargo run -p automatond -- serve
 
-# Build the SwiftUI Menu Bar app
-cd apps/Automaton && swift build -Xswiftc -warnings-as-errors
+# In another terminal, start the menu bar app
+cd apps/Automaton
+swift run
 ```
 
-### Self-Diagnostics (`doctor`)
+Or build a proper .app bundle:
 
-Verify your macOS permissions (Accessibility, Screen Recording) and environment setup:
+```bash
+./scripts/build-app.sh
+open build/Automaton.app
+```
+
+### First Run
+
+1. A ⚙ gear icon appears in your menu bar
+2. Click it to open the chat popover
+3. Grant **Accessibility** and **Screen Recording** permissions when prompted (for mac mode)
+4. Start chatting — automaton learns about you and remembers across sessions
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│  SwiftUI Shell (menu bar + window)          │
+│  Brass & Glass · Chat Bubbles · Sidebar     │
+└──────────────────┬──────────────────────────┘
+                   │ JSON-RPC over Unix Socket
+┌──────────────────┴──────────────────────────┐
+│  automatond (Rust daemon)                   │
+│  ┌─────────┐ ┌──────────┐ ┌─────────────┐ │
+│  │ Agent   │ │ Policy   │ │ Apprentice  │ │
+│  │ Loop    │ │ Engine   │ │ (learning)  │ │
+│  └────┬────┘ └────┬─────┘ └──────┬──────┘ │
+│       │           │              │          │
+│  ┌────┴────┐ ┌────┴─────┐ ┌─────┴──────┐ │
+│  │Provider │ │ Tools    │ │ Memory     │ │
+│  │(OpenAI) │ │(fs/shell/│ │(SQLite/FTS)│ │
+│  │         │ │ mac/AX)  │ │            │ │
+│  └─────────┘ └──────────┘ └────────────┘ │
+└─────────────────────────────────────────────┘
+```
+
+### Crates
+
+| Crate | Purpose |
+|-------|---------|
+| `automaton-proto` | JSON-RPC wire types (requests, events) |
+| `automaton-policy` | Deterministic permission engine |
+| `automaton-tools` | Tool registry + filesystem/shell/mac tools |
+| `automaton-core` | Agent loop, providers, mode profiles |
+| `automaton-memory` | SQLite storage + FTS5 + skill loader |
+| `automaton-apprentice` | Decision journal + similarity hints |
+| `reference/automatond` | Reference daemon binary |
+
+## Safety Model
+
+All tool calls pass through a deterministic policy engine:
+
+1. **Password fields** → hard deny (cannot be overridden)
+2. **Mode switching** → always requires approval
+3. **Owner grants** → whitelist for "always allow" (tool-scoped)
+4. **Explicit deny rules** → banking apps, sensitive areas
+5. **Shell classification** → read-only commands auto-allow; build tools require approval; everything else requires approval
+
+## Memory & Learning
+
+automaton learns about you through conversation:
+
+- Agent outputs `[기억: fact]` markers → automatically saved
+- Facts are injected into system prompts (cache-friendly: end of history)
+- Session summaries generated after idle periods
+- Decision journal tracks your approvals for similarity hints
+
+Edit `~/.config/automaton/persona.md` to customize the agent's personality.
+
+## Skills
+
+Skills are markdown files in `~/.config/automaton/skills/`:
+
+```
+~/.config/automaton/skills/
+├── organize-downloads/SKILL.md
+├── find-and-open/SKILL.md
+└── git-commit/SKILL.md
+```
+
+Compatible with the [agentskills.io](https://agentskills.io) standard.
+
+## Voice (Experimental)
+
+Push-to-talk with `⌘⇧Space`:
+- Speech recognition (on-device when available)
+- Text-to-speech responses
+- Interrupt TTS by typing
+
+## Configuration
+
+| File | Purpose |
+|------|---------|
+| `~/.config/automaton/persona.md` | Agent personality |
+| `~/.config/automaton/policy.toml` | Permission rules |
+| `~/.config/automaton/skills/` | Skill definitions |
+| `~/.local/share/automaton/memory.db` | Memory (SQLite) |
+| `~/.local/share/automaton/audit/` | Audit logs (JSONL) |
+
+## Diagnostics
 
 ```bash
 cargo run -p automatond -- doctor
 ```
 
-### Start the Daemon
-
-```bash
-export AUTOMATON_API_KEY="your-api-key"
-cargo run -p automatond -- serve
-```
-
-Then in another terminal:
-
-```bash
-cd apps/Automaton && swift run
-```
-
----
-
-## Security Invariants
-
-1. **Hard-Denied Sensitive Inputs**: Fields matching passwords, passphrases, tokens, credentials, PINs, or OTPs are unconditionally denied. No user grant or model instruction can override this rule.
-2. **Command Injection Defense**: Shell execution enforces a 12-metacharacter blacklist (`;`, `&&`, `|`, `<`, `>`, etc.) and output flag interception (`--output`, `-o`), guaranteeing complex or file-writing commands always require human approval.
-3. **Decoy Argument Neutralization**: Tool parameter extraction strictly reads declared operands (e.g. `command` for `shell.exec`, `path` for filesystem tools), making it impossible for untrusted model outputs to spoof targets or bypass inspection with extra keys.
-4. **Local Socket Protection**: The daemon's Unix domain socket is bound with `0o600` permissions immediately upon creation, restricting access strictly to the local owner.
-
----
+Checks accessibility permissions, screen recording, API key, and directory setup.
 
 ## License
 
-Dual-licensed under either of:
+MIT OR Apache-2.0
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+## Contributing
 
-at your option.
+PRs welcome. Run `cargo test --workspace` before submitting.
