@@ -20,6 +20,8 @@ pub enum Request {
     ApprovalRespond { session: String, approval: String, decision: Decision, always: bool },
     ModeSwitch { session: String, to: Mode },
     HistoryGet { session: String, limit: usize },
+    /// 세션 요약 조회 — summaries 테이블의 해당 세션 요약 (사이드바 표시용)
+    SummaryGet { session: String },
     /// 현재 턴 중단 — 장시간 셸 명령·응답 생성 취소
     Interrupt { session: String },
     SessionList,
@@ -66,6 +68,8 @@ pub enum Event {
     ToolStarted { session: String, tool: String, summary: String },
     ToolResult { session: String, tool: String, ok: bool, summary: String },
     ApprovalRequested { session: String, approval: String, action: ActionInfo, hint: Option<Hint> },
+    /// 세션 요약 응답 — 해당 세션의 저장된 요약 (요약 없으면 빈 문자열)
+    SummaryData { session: String, summary: String },
     /// Apprentice 3단계 답변 초안 (§6) — 승인 배너 직후 발행, 칩은 어드바이저일 뿐 승인 아님
     DraftSuggestions { session: String, suggestions: Vec<String> },
     /// 완성 1회당 API 사용량 리포트 — writer_loop가 감사 로그에 기록

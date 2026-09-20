@@ -1,0 +1,52 @@
+<h2>automaton — 모드·권한 시스템 (섹션 2/5)</h2>
+<p class="subtitle">모드 = 툴셋 + 프롬프트 + 권한 프로파일의 조합. 권한은 언제나 결정론적 규칙이 판정.</p>
+
+<div class="section">
+  <h3>초기 3개 모드</h3>
+  <table style="width:100%;border-collapse:collapse;font-size:14px;">
+    <tr style="border-bottom:2px solid #b08d57;text-align:left;"><th style="padding:6px;">모드</th><th style="padding:6px;">툴셋</th><th style="padding:6px;">자율 수준</th><th style="padding:6px;">성격(프롬프트)</th></tr>
+    <tr style="border-bottom:1px solid #555;"><td style="padding:6px;"><b>⚙ code</b></td><td style="padding:6px;">fs·shell·edit·grep·lsp</td><td style="padding:6px;">자율 (위험 셸만 검사)</td><td style="padding:6px;">정확한 엔지니어</td></tr>
+    <tr style="border-bottom:1px solid #555;"><td style="padding:6px;"><b>🔭 mac</b></td><td style="padding:6px;">capture·AX·click·type + 제한 셸</td><td style="padding:6px;">위험 동작 승인</td><td style="padding:6px;">신중한 조작수</td></tr>
+    <tr><td style="padding:6px;"><b>📖 chat</b></td><td style="padding:6px;">읽기 전용 (grep·read)</td><td style="padding:6px;">완전 자율 (부작용 없음)</td><td style="padding:6px;">대화 파트너</td></tr>
+  </table>
+  <p class="subtitle" style="margin-top:6px;">모드 전환: 사용자 명시(단축키·명령) 또는 에이전트 요청 → 전환 자체도 승인 이벤트. 세션 컨텍스트는 유지, 툴셋만 스왑.</p>
+</div>
+
+<div class="mockup">
+  <div class="mockup-header">툴 호출 권한 흐름</div>
+  <div class="mockup-body" style="font-family:ui-monospace,monospace;font-size:13px;">
+    <div style="display:flex;gap:6px;align-items:stretch;flex-wrap:wrap;">
+      <div style="flex:1;border:1px solid #666;border-radius:6px;padding:10px;text-align:center;min-width:110px;">툴 호출<br><span style="color:#888;">Agent Loop</span></div>
+      <div style="align-self:center;color:#b08d57;">→</div>
+      <div style="flex:1;border:2px solid #b08d57;border-radius:6px;padding:10px;text-align:center;min-width:110px;">Policy Engine<br><span style="color:#888;">규칙 평가 (결정론적)</span></div>
+      <div style="align-self:center;color:#b08d57;">→</div>
+      <div style="flex:2;display:grid;gap:6px;">
+        <div style="border:1px solid #4a7c4a;border-radius:6px;padding:8px;background:rgba(74,124,74,.08);"><b>ALLOW</b> — 읽기류·모드 내 안전 쓰기 → 즉시 실행</div>
+        <div style="border:1px solid #c96;border-radius:6px;padding:8px;background:rgba(204,153,102,.08);"><b>ASK</b> — 위험 동작 → 승인 배너 (+Apprentice 힌트) → 승인/거절/<b>항상 허용</b></div>
+        <div style="border:1px solid #c55;border-radius:6px;padding:8px;background:rgba(204,85,85,.08);"><b>DENY</b> — 정책 위반 (금지 앱·영역) → 거절 사유 반환</div>
+      </div>
+    </div>
+    <div style="margin-top:10px;color:#888;">모든 결정(allow 포함)은 감사 로그 + Decision Journal에 기록 → Apprentice 학습 데이터</div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>위험 분류 규칙 (초기값)</h3>
+  <ul style="font-size:14px;">
+    <li><b>ALLOW</b>: 화면 캡처, AX 트리 읽기, 파일 읽기·검색, code 모드의 편집·빌드</li>
+    <li><b>ASK</b>: 셸 실행(mac 모드), 파일 삭제/이동, 시스템 설정 변경, 미등록 앱 클릭/타이핑, 모드 전환, 큰 금액·외부 전송 전 전부</li>
+    <li><b>DENY</b>: 화이트리스트 밖 민감 영역(비밀번호 필드·Banking 앱 등), 설정된 금지 목록</li>
+    <li><b>항상 허용</b> 선택 시 해당 규칙만 정책 파일에 추가 (감사 가능, 언제든 철회)</li>
+  </ul>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="approve" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content"><h3>이대로 진행</h3><p>다음 섹션: 메모리·스킬 시스템</p></div>
+  </div>
+  <div class="option" data-choice="revise" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content"><h3>수정 원함</h3><p>터미널에서 말씀해 주세요</p></div>
+  </div>
+</div>

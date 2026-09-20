@@ -212,6 +212,11 @@ impl Daemon {
                         let _ = tx.send(Event::StreamDelta { session: session.clone(), delta: text });
                     }
                 }
+                Request::SummaryGet { session } => {
+                    // 세션 요약 반환 — summaries 테이블 (없으면 빈 문자열: 셸이 캐시 비움)
+                    let summary = self.store.summary(&session).unwrap_or(None).unwrap_or_default();
+                    let _ = tx.send(Event::SummaryData { session, summary });
+                }
                 Request::Interrupt { session } => {
                     // 사용자 중단 — 진행 중 턴에 오류 이벤트를 보내 셸이 즉시 제어권 회복
                     let _ = tx.send(Event::Error { session: Some(session.clone()), message: "⛔ 사용자가 중단했습니다".into() });
@@ -487,7 +492,7 @@ fn session_of(ev: &Event) -> Option<String> {
     match ev {
         Event::StreamDelta { session, .. } | Event::ToolStarted { session, .. } | Event::ToolResult { session, .. }
         | Event::ApprovalRequested { session, .. } | Event::DraftSuggestions { session, .. } | Event::Usage { session, .. }
-        | Event::ModeChanged { session, .. } => Some(session.clone()),
+        | Event::ModeChanged { session, .. } | Event::SummaryData { session, .. } => Some(session.clone()),
         Event::Error { session, .. } => session.clone(),
         // 메모리 브라우저 응답은 세션 스코프 아님 — 감사 대상 제외
         Event::MemoryData { .. } | Event::MemoryStats { .. } => None,

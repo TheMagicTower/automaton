@@ -1,0 +1,96 @@
+<h2>automaton — UI 디자인 방향 (섹션 4/5)</h2>
+<p class="subtitle">메뉴바 팝오버(주 창구) + 필요시 메인 윈도우(세션 히스토리·메모리 브라우저·설정). 아래는 팝오버의 3가지 비주얼 방향 — 같은 화면(모드 스위처 · 대화 · 승인 배너 · 답장 초안 칩)을 스타일만 바꿔 그렸습니다.</p>
+
+<div class="cards">
+
+  <div class="card" data-choice="brass_glass" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:0;">
+      <div style="background:#1a1611;padding:12px;font-size:12px;color:#d8cbb2;">
+        <div style="display:flex;gap:6px;margin-bottom:10px;font-family:Georgia,serif;">
+          <span style="border:1px solid #6b5a3e;border-radius:10px;padding:2px 10px;color:#8a7a5c;">⚙ code</span>
+          <span style="border:1px solid #c9a227;border-radius:10px;padding:2px 10px;background:linear-gradient(180deg,#3a2f1a,#241c0e);color:#e8c877;box-shadow:0 0 6px rgba(201,162,39,.4);">🔭 mac</span>
+          <span style="border:1px solid #6b5a3e;border-radius:10px;padding:2px 10px;color:#8a7a5c;">📖 chat</span>
+        </div>
+        <div style="border-left:2px solid #b08d57;padding-left:8px;margin-bottom:6px;color:#9a8b6f;">다운로드 폴더 정리해줘</div>
+        <div style="padding-left:8px;margin-bottom:8px;"><span style="border:1px solid #4a3f2c;border-radius:4px;padding:1px 6px;color:#c9a227;font-size:10px;">AX</span> Finder → 다운로드 12개 파일 감지</div>
+        <div style="border:1px solid #b08d57;border-radius:6px;padding:8px;background:rgba(176,141,87,.1);margin-bottom:8px;">
+          <div style="font-family:Georgia,serif;color:#e8c877;margin-bottom:4px;">⚖ 파일 12개 휴지통으로 이동</div>
+          <div style="font-size:10px;color:#8a7a5c;margin-bottom:6px;">◈ 지난번 유사 상황에서 승인 (3회)</div>
+          <span style="border:1px solid #c9a227;border-radius:4px;padding:1px 8px;color:#1a1611;background:#c9a227;font-weight:700;">승인</span>
+          <span style="border:1px solid #6b5a3e;border-radius:4px;padding:1px 8px;margin-left:4px;">거절</span>
+          <span style="border:1px solid #6b5a3e;border-radius:4px;padding:1px 8px;margin-left:4px;">항상 허용</span>
+        </div>
+        <div style="border:1px dashed #6b5a3e;border-radius:6px;padding:4px 8px;color:#e8c877;">✎ 그래, 진행해 <span style="float:right;color:#8a7a5c;">전송 ⏎</span></div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. Brass &amp; Glass (추천)</h3>
+      <p>다크 월넛 배경 + 황동 액센트 + 세리프 제목. 우아한 실용 스팀펑크 — 가독성 유지되면서 테마가 확실. 다크 모드 네이티브와도 잘 어울림.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="blueprint" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:0;">
+      <div style="background:#0d2137;background-image:repeating-linear-gradient(0deg,transparent,transparent 14px,rgba(127,180,232,.07) 14px,rgba(127,180,232,.07) 15px),repeating-linear-gradient(90deg,transparent,transparent 14px,rgba(127,180,232,.07) 14px,rgba(127,180,232,.07) 15px);padding:12px;font-size:12px;color:#cfe3f5;font-family:ui-monospace,monospace;">
+        <div style="display:flex;gap:6px;margin-bottom:10px;">
+          <span style="border:1px solid #3e5a75;border-radius:2px;padding:2px 10px;color:#6f8aa5;">[⚙ CODE]</span>
+          <span style="border:1px solid #7fb4e8;border-radius:2px;padding:2px 10px;background:rgba(127,180,232,.15);color:#fff;">[🔭 MAC]</span>
+          <span style="border:1px solid #3e5a75;border-radius:2px;padding:2px 10px;color:#6f8aa5;">[📖 CHAT]</span>
+        </div>
+        <div style="border-left:1px solid #7fb4e8;padding-left:8px;margin-bottom:6px;color:#8fb3d4;">다운로드 폴더 정리해줘</div>
+        <div style="padding-left:8px;margin-bottom:8px;"><span style="border:1px solid #7fb4e8;color:#7fb4e8;border-radius:2px;padding:0 6px;font-size:10px;">TOOL:AX</span> Finder → 다운로드 12개 파일 감지</div>
+        <div style="border:1px solid #7fb4e8;border-radius:2px;padding:8px;margin-bottom:8px;">
+          <div style="color:#fff;margin-bottom:4px;">▣ FILE OP: 12 ITEMS → TRASH</div>
+          <div style="font-size:10px;color:#6f8aa5;margin-bottom:6px;">REF: PAST-APPROVAL ×3 (SIMILAR)</div>
+          <span style="border:1px solid #7fb4e8;color:#0d2137;background:#7fb4e8;padding:1px 8px;font-weight:700;">APPROVE</span>
+          <span style="border:1px solid #3e5a75;padding:1px 8px;margin-left:4px;">DENY</span>
+          <span style="border:1px solid #3e5a75;padding:1px 8px;margin-left:4px;">ALWAYS</span>
+        </div>
+        <div style="border:1px dashed #3e5a75;padding:4px 8px;color:#7fb4e8;">DRAFT: 그래, 진행해</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. Blueprint</h3>
+      <p>설계 도면(청사진) 스타일 — 모노스페이스·라인워크·격자. 빅토리아 공학 미학, 엔지니어 감성. 테마는 약간 절제되지만 기술적 신뢰감이 강함.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="antique" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:0;">
+      <div style="background:#e9dcc3;padding:12px;font-size:12px;color:#3a2d1a;font-family:Georgia,serif;">
+        <div style="text-align:center;border-bottom:2px double #8a6d3b;padding-bottom:4px;margin-bottom:8px;font-variant:small-caps;letter-spacing:1px;">automaton — 맥 조작실</div>
+        <div style="display:flex;gap:6px;margin-bottom:10px;justify-content:center;">
+          <span style="border:1px solid #b8a582;border-radius:14px;padding:1px 10px;color:#8a6d3b;">⚙ 코드</span>
+          <span style="border:2px solid #8a6d3b;border-radius:14px;padding:1px 10px;background:linear-gradient(180deg,#d4b872,#b89044);color:#2d1f0e;box-shadow:inset 0 1px 0 rgba(255,255,255,.5);">🔭 맥</span>
+          <span style="border:1px solid #b8a582;border-radius:14px;padding:1px 10px;color:#8a6d3b;">📖 대화</span>
+        </div>
+        <div style="border-left:2px solid #8a6d3b;padding-left:8px;margin-bottom:6px;font-style:italic;">다운로드 폴더를 정리해 주게.</div>
+        <div style="padding-left:8px;margin-bottom:8px;font-size:11px;">⟡ Finder에서 문서 12통을 발견하였습니다.</div>
+        <div style="border:2px solid #8a6d3b;border-radius:4px;padding:8px;background:rgba(138,109,59,.08);margin-bottom:8px;box-shadow:2px 2px 0 rgba(138,109,59,.25);">
+          <div style="font-variant:small-caps;margin-bottom:4px;">⚖ 서류 12통을 폐기함으로 이동</div>
+          <div style="font-size:10px;color:#8a6d3b;margin-bottom:6px;">※ 지난 유사 상황에서 윤허하심 (3회)</div>
+          <span style="border:1px solid #5c4a28;border-radius:3px;padding:1px 10px;background:linear-gradient(180deg,#c9a961,#a8874a);color:#2d1f0e;">승인</span>
+          <span style="border:1px solid #8a6d3b;border-radius:3px;padding:1px 10px;margin-left:4px;background:#f4ecd9;">거절</span>
+          <span style="border:1px solid #8a6d3b;border-radius:3px;padding:1px 10px;margin-left:4px;background:#f4ecd9;">윤허</span>
+        </div>
+        <div style="border:1px dotted #8a6d3b;padding:4px 8px;font-style:italic;">✎ 그러하게 하지 — 송신 ⏎</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. Full Antique</h3>
+      <p>양피지+구리판 활자+장식 테두리. 테마 몰입도 최강. 단 밝은 배경이라 다크 환경과 충돌하고 장식이 정보 밀도를 희생 — 취향이 강할 때 선택.</p>
+    </div>
+  </div>
+
+</div>
+
+<div class="options">
+  <div class="option" data-choice="approve" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content"><h3>방향 확정 — 다음 섹션으로</h3><p>선택한 방향으로 진행 (섹션 5: 데이터 흐름·에러 처리·테스트)</p></div>
+  </div>
+  <div class="option" data-choice="revise" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content"><h3>혼합/수정 원함</h3><p>예: A 베이스 + C의 세리프·문구 톤 — 터미널에서 말씀해 주세요</p></div>
+  </div>
+</div>

@@ -71,6 +71,14 @@ impl MemoryStore {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// 세션 단일 요약 조회 — SummaryGet 핸들러(사이드바 표시)용. 없으면 None.
+    pub fn summary(&self, session: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT summary FROM summaries WHERE session = ?1")?;
+        let mut rows = stmt.query_map([session], |r| r.get::<_, String>(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
     pub fn add_fact(&self, content: &str) -> Result<()> {
         self.conn.lock().execute("INSERT INTO facts_fts(content) VALUES (?1)", (content,))?;
         Ok(())

@@ -53,7 +53,10 @@ final class ShellModel {
     var draftSuggestions: [String] = []
     var isThinking = false
     var connected = false
-    var memoryCount: Int = 0
+    // 기억 브라우저 상태 — memory_browse/memory_stats 응답 (우클릭 메뉴 → 팝오버)
+    var memoryFacts: [String] = []
+    var memoryTotal = 0
+    var memoryStats: (facts: Int, sessions: Int, decisions: Int)?
     let voiceOutput = VoiceOutputManager()
     private let conn = DaemonConnection()
     private var session: String {
@@ -63,6 +66,8 @@ final class ShellModel {
     /// history_get 응답 대기 — 데몬은 이력을 "▸ " 접두 텍스트 blob 한 덩어리로 보낸다
     private var historyPending = false
     private var persistTask: Task<Void, Never>?
+    /// 현재 세션 요약 스냅샷 — persistSessions가 stream으로 기록을 재생성할 때 반영(기록이 아직 없을 수 있음)
+    private var currentSummary: String?
 
     var currentSessionID: String { session }
 
@@ -105,6 +110,7 @@ final class ShellModel {
         historyPending = true
         Task {
             await conn.sendRequest(method: "history_get", params: ["session": session, "limit": 50])
+            await conn.sendRequest(method: "summary_get", params: ["session": session]) // 사이드바 요약 — history와 함께
         }
     }
 
@@ -129,6 +135,7 @@ final class ShellModel {
             // 이전 대화 이력 로딩 — 저장된 세션이면 최근 메시지 표시
             historyPending = true
             await conn.sendRequest(method: "history_get", params: ["session": session, "limit": 50])
+            requestSessionSummaries() // 사이드바 전체 요약 로딩 — 현재 + 캐시된 세션
             for await ev in events {
                 connected = true
                 apply(ev)
@@ -137,7 +144,45 @@ final class ShellModel {
         }
     }
 
+    /// 사이드바 요약 로딩 — 현재 + 캐시된 세션 전부 summary_get (데몬 summaries 테이블)
+    private func requestSessionSummaries() {
+        var seen = Set<String>()
+        let ids = [session] + sessions.map(\.id)
+        Task {
+            for id in ids where seen.insert(id).inserted {
+                await conn.sendRequest(method: "summary_get", params: ["session": id])
+            }
+        }
+    }
+
+    /// 기억 브라우저 — facts 첫 페이지 + 통계 조회 (팝오버 onAppear·새로고침)
+    func browseMemory() {
+        Task {
+            await conn.sendRequest(method: "memory_browse", params: ["offset": 0, "limit": 100])
+            await conn.sendRequest(method: "memory_stats", params: [:])
+        }
+    }
+
+    /// fact 삭제 — memory_delete 후 재조회로 목록·통계 갱신 (요청은 연결당 순차 처리되어 반영 보장)
+    func deleteMemory(_ fact: String) {
+        Task {
+            await conn.sendRequest(method: "memory_delete", params: ["content": fact])
+            await conn.sendRequest(method: "memory_browse", params: ["offset": 0, "limit": 100])
+            await conn.sendRequest(method: "memory_stats", params: [:])
+        }
+    }
+
     private func apply(_ ev: ShellEvent) {
+        // 세션 요약은 사이드바 기록 갱신 — 타 세션 스트림 필터 대상 아님(전 세션 요약도 표시)
+        if case .summaryData(let s, let summary) = ev {
+            let value = summary.isEmpty ? nil : summary
+            if s == session { currentSummary = value }
+            if let i = sessions.firstIndex(where: { $0.id == s }) {
+                sessions[i].summary = value
+                SessionStore.save(sessions)
+            }
+            return
+        }
         // 타 세션 이벤트 무시 — 전환 직후 구세션 스트림이 새 뷰에 섞이는 것 방지
         if let s = Self.sessionOf(ev), s != session { return }
         switch ev {
@@ -167,14 +212,16 @@ final class ShellModel {
             draftSuggestions = suggestions
         case .modeChanged(_, let mode):
             self.mode = mode
+        case .summaryData:
+            break // 상단 선처리(사이드바 기록 갱신) 후 도달 불가 — 스위치 완전성용
         case .usage:
             isThinking = false // 턴 종료 — usage 이벤트에서 확실히 해제
         case .memoryData(_, let facts, let total):
-            memoryCount = total
-            appendEntry(.tool, "🧠 기억 \(total)건: \(facts.prefix(3).joined(separator: ", "))")
+            memoryTotal = total
+            // 빈 facts + 잔여 total = memory_delete 확인 응답(데몬 계약) → 목록 지우지 않음, 후속 browse가 갱신
+            if !(facts.isEmpty && total > 0) { memoryFacts = facts }
         case .memoryStats(_, let facts, let sessions, let decisions):
-            memoryCount = facts
-            appendEntry(.tool, "📊 기억 \(facts)건 · 세션 \(sessions)개 · 결정 \(decisions)건")
+            memoryStats = (facts, sessions, decisions)
         case .error(_, let message):
             isThinking = false
             appendEntry(.error, message)
@@ -185,8 +232,10 @@ final class ShellModel {
         switch ev {
         case .streamDelta(let s, _), .toolStarted(let s, _, _), .toolResult(let s, _, _, _),
              .approvalRequested(let s, _, _, _), .draftSuggestions(let s, _), .modeChanged(let s, _),
-             .usage(let s), .memoryData(let s, _, _), .memoryStats(let s, _, _, _):
+             .usage(let s), .summaryData(let s, _):
             return s
+        case .memoryData(let s, _, _), .memoryStats(let s, _, _, _):
+            return s // nil 허용 — 기억 이벤트는 세션 무관(데몬이 session 필드 없이 발행)
         case .error(let s, _):
             return s
         }
@@ -268,7 +317,7 @@ final class ShellModel {
         if !stream.isEmpty {
             var entries = stream
             if entries.count > 200 { entries.removeFirst(entries.count - 200) } // 세션당 대화 캐시 상한
-            recs.append(SessionRecord(id: session, entries: entries, updatedAt: Date()))
+            recs.append(SessionRecord(id: session, entries: entries, updatedAt: Date(), summary: currentSummary))
         }
         recs.sort { $0.updatedAt > $1.updatedAt }
         if recs.count > 20 { recs.removeLast(recs.count - 20) } // 보관 세션 수 상한

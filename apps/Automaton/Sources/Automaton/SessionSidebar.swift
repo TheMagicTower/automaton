@@ -7,6 +7,8 @@ struct SessionRecord: Identifiable, Codable {
     let id: String
     var entries: [ChatEntry]
     var updatedAt: Date
+    /// 데몬 summaries 테이블의 세션 요약 — summary_get으로 갱신, 없으면 nil(구형 캐시 디코드 호환)
+    var summary: String? = nil
 }
 
 extension SessionRecord {
@@ -100,17 +102,17 @@ struct SessionSidebar: View {
 private struct SessionRow: View {
     let record: SessionRecord
     let isCurrent: Bool
-
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(record.title)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(isCurrent ? Theme.gold : Theme.ivory)
                 .lineLimit(1)
-            Text(record.preview)
+            // 요약 우선 — 데몬이 생성한 3줄 세션 요약(회색), 없으면 마지막 메시지 미리보기로 폴백
+            Text(record.summary ?? record.preview)
                 .font(.system(size: 10))
                 .foregroundStyle(Theme.dim)
-                .lineLimit(1)
+                .lineLimit(record.summary == nil ? 1 : 2)
             Text(record.timeLabel)
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundStyle(Theme.dim.opacity(0.8))

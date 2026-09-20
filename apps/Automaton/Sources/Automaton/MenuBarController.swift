@@ -11,6 +11,8 @@ final class MenuBarController: NSObject, NSPopoverDelegate, NSWindowDelegate {
     private var voiceInput: VoiceInputManager!
     private var eventMonitor: Any?
     private var mainWindow: NSWindow?
+    /// 기억 브라우저 팝오버 — 우클릭 메뉴에서 표시 (§7), 바깥 클릭으로 닫힘
+    private var memoryPopover: NSPopover?
 
     func setup(model: ShellModel, voiceInput: VoiceInputManager) {
         self.model = model
@@ -83,6 +85,10 @@ final class MenuBarController: NSObject, NSPopoverDelegate, NSWindowDelegate {
         newSessionItem.target = self
         menu.addItem(newSessionItem)
 
+        let memoryItem = NSMenuItem(title: "🧠 기억 브라우저", action: #selector(showMemoryBrowserAction), keyEquivalent: "m")
+        memoryItem.target = self
+        menu.addItem(memoryItem)
+
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "automaton 종료", action: #selector(quitAction), keyEquivalent: "q")
@@ -148,6 +154,25 @@ final class MenuBarController: NSObject, NSPopoverDelegate, NSWindowDelegate {
         model.newSession()
         closePopover()
         showPopover()
+    }
+
+    /// 기억 브라우저 팝오버 표시 — 메인 팝오버를 닫고 상태 아이콘에 붙여 띄운다.
+    /// .transient 동작이라 별도 이벤트 모니터 없이 바깥 클릭으로 닫힌다.
+    @objc private func showMemoryBrowserAction() {
+        guard let button = statusItem.button else { return }
+        if popover.isShown { closePopover() }
+        if memoryPopover == nil {
+            let pop = NSPopover()
+            pop.contentSize = NSSize(width: 380, height: 460)
+            pop.behavior = .transient
+            pop.animates = true
+            let hosting = NSHostingView(rootView: MemoryBrowser().environment(model))
+            let vc = NSViewController()
+            vc.view = hosting
+            pop.contentViewController = vc
+            memoryPopover = pop
+        }
+        memoryPopover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     }
 
     @objc private func quitAction() {

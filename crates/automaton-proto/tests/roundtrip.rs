@@ -87,3 +87,21 @@ fn memory_rpc_roundtrip() {
     assert!(json.contains(r#""memory_stats""#));
     assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), ev);
 }
+
+#[test]
+fn summary_rpc_roundtrip() {
+    // 요청 — summary_get (사이드바 세션 요약 표시)
+    let req = Request::SummaryGet { session: "shell-1".into() };
+    let json = serde_json::to_string(&req).unwrap();
+    assert!(json.contains(r#""summary_get""#));
+    assert_eq!(serde_json::from_str::<Request>(&json).unwrap(), req);
+
+    // 이벤트 — summary_data (요약 없음 = 빈 문자열도 왕복)
+    let ev = Event::SummaryData { session: "shell-1".into(), summary: "다운로드 폴더 정리를 마쳤다".into() };
+    let json = serde_json::to_string(&ev).unwrap();
+    assert!(json.contains(r#""summary_data""#));
+    assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), ev);
+
+    let ev = Event::SummaryData { session: "shell-2".into(), summary: String::new() };
+    assert_eq!(serde_json::from_str::<Event>(&serde_json::to_string(&ev).unwrap()).unwrap(), ev);
+}

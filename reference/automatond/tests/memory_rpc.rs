@@ -55,6 +55,7 @@ async fn memory_browse_stats_delete_roundtrip() {
         seed.add_fact("선호 에디터는 vim").unwrap();
         seed.append_message("s0", "user", "이전 세션 대화").unwrap();
         seed.record_decision("s0", "fs.delete", "x.zip", "ask", "approve").unwrap();
+        seed.save_summary("s0", "다운로드 폴더 정리를 마쳤고 vim 설정을 바꿨다").unwrap();
     }
     let systems = Arc::new(Mutex::new(Vec::new()));
     let provider = Capturing { systems: systems.clone() };
@@ -108,6 +109,14 @@ async fn memory_browse_stats_delete_roundtrip() {
     wr.write_all("{\"method\":\"memory_delete\",\"params\":{\"content\":\"없는 fact\"}}\n".as_bytes()).await.unwrap();
     let evs = read_events(&mut reader, "Error").await;
     assert!(matches!(evs.last(), Some(Event::Error { message, .. }) if message.contains("삭제할 fact가 없음")), "명시적 오류: {evs:?}");
+
+    // 5) 세션 요약 조회 — 저장된 요약 반환 / 없는 세션은 빈 문자열 (사이드바 표시 계약)
+    wr.write_all(b"{\"method\":\"summary_get\",\"params\":{\"session\":\"s0\"}}\n").await.unwrap();
+    let evs = read_events(&mut reader, "SummaryData").await;
+    assert!(matches!(evs.last(), Some(Event::SummaryData { session, summary }) if session == "s0" && summary == "다운로드 폴더 정리를 마쳤고 vim 설정을 바꿨다"), "요약 왕복: {evs:?}");
+    wr.write_all(b"{\"method\":\"summary_get\",\"params\":{\"session\":\"no-such\"}}\n").await.unwrap();
+    let evs = read_events(&mut reader, "SummaryData").await;
+    assert!(matches!(evs.last(), Some(Event::SummaryData { summary, .. }) if summary.is_empty()), "요약 없음 = 빈 문자열: {evs:?}");
 }
 
 #[tokio::test]

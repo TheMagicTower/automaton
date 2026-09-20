@@ -1,0 +1,50 @@
+<h2>automaton — 메모리·스킬 시스템 (섹션 3/5)</h2>
+<p class="subtitle">스킬 = 명시적 절차 기억(어떻게), 메모리 = 사실·선호(무엇을), Apprentice = 암시적 선호 학습(무엇을 좋아하는지).</p>
+
+<div class="mockup">
+  <div class="mockup-header">메모리 3계층</div>
+  <div class="mockup-body" style="font-family:ui-monospace,monospace;font-size:13px;">
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
+      <div style="border:1px solid #888;border-radius:8px;padding:10px;background:rgba(136,136,136,.06);">
+        <b>① 세션</b><br><span style="color:#888;">현재 대화·툴 결과<br>압축 요약으로 관리</span>
+      </div>
+      <div style="border:1px solid #a08020;border-radius:8px;padding:10px;background:rgba(201,162,39,.06);">
+        <b>② 작업</b><br><span style="color:#888;">세션 요약 보관<br>FTS5 + 벡터 검색</span>
+      </div>
+      <div style="border:2px solid #b08d57;border-radius:8px;padding:10px;background:rgba(176,141,87,.08);">
+        <b>③ 장기 (큐레이션)</b><br><span style="color:#888;">에이전트가 사실 제안<br>→ 내가 승인해 저장</span>
+      </div>
+    </div>
+    <div style="margin-top:10px;color:#888;">단일 SQLite (sessions · summaries · facts · decisions) + 임베딩은 sqlite-vec. 세션 시작 시 관련 기억 top-k 자동 주입 + <code>memory.search</code> 툴로 명시 검색.</div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>장기 메모리 큐레이션 (Hermes 패턴 차용)</h3>
+  <ul style="font-size:14px;">
+    <li>세션 종료/유휴 시 에이전트가 <b>"기억할 만한 것"</b>을 제안 (예: "선호: PR 생성 전 항상 로컬 테스트")</li>
+    <li>SwiftUI에서 승인/거절 → 승인된 것만 facts 테이블로 → <b>오염 방지</b></li>
+    <li>거절 이력도 Apprentice가 학습 (같은 제안 반복 방지)</li>
+  </ul>
+</div>
+
+<div class="section">
+  <h3>스킬 시스템 (agentskills.io 호환)</h3>
+  <ul style="font-size:14px;">
+    <li>스킬 = 폴더 + <code>SKILL.md</code>(이름·설명·사용시점) + 선택적 스크립트/참고문서</li>
+    <li><b>점진적 로딩</b>: 시스템 프롬프트엔 이름·설명만 → 필요할 때 본문 로드 (토큰 효율, 이 하네스와 동일 패턴)</li>
+    <li>위치: <code>~/.config/automaton/skills/</code> (전역) + 프로젝트 <code>.automaton/skills/</code>. 모드 스코프 가능(mac 전용 스킬 등)</li>
+    <li><b>자기개선 루프</b>: 복잡 작업 성공 후 에이전트가 절차를 스킬로 제안 → 승인하면 저장 (Hermes의 "grows with you")</li>
+  </ul>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="approve" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content"><h3>이대로 진행</h3><p>다음 섹션: UI 디자인 방향 (스팀펑크 비주얼)</p></div>
+  </div>
+  <div class="option" data-choice="revise" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content"><h3>수정 원함</h3><p>터미널에서 말씀해 주세요</p></div>
+  </div>
+</div>
