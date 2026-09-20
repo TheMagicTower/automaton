@@ -135,11 +135,35 @@ impl<P: Provider, G: ApprovalGate> AgentLoop<P, G> {
     }
 
     fn execute_and_record(&self, session: &str, tool: &dyn Tool, call: &ToolCall, history: &mut Vec<Message>, emit: &mut (dyn FnMut(Event) + Send)) {
-        emit(Event::ToolStarted { session: session.into(), tool: call.name.clone(), summary: tool.description().to_string() });
-        let result = tool.execute(&call.args).map_err(|e| format!("오류: {e}")); // "오류:" 마커 — 연속 실패 가드(§9)가 실행 실패도 포집 (리뷰 자문)
+        let summary = display_summary(&call.name, &call.args);
+        emit(Event::ToolStarted { session: session.into(), tool: call.name.clone(), summary });
+        let result = tool.execute(&call.args).map_err(|e| format!("오류: {e}"));
         let (ok, text) = match result { Ok(s) => (true, s), Err(e) => (false, e) };
         emit(Event::ToolResult { session: session.into(), tool: call.name.clone(), ok, summary: truncate(&text, 400) });
         history.push(Message { role: "tool".into(), content: format!("[{}] {}", call.name, text) });
+    }
+}
+
+/// 툴 이름 + 실제 인자에서 사용자가 이해할 수 있는 요약 생성 — "shell.exec"만 보여주는 것이 아니라
+/// "$ df -h" 또는 "📄 Cargo.toml"처럼 무엇을 하는지 즉시 알 수 있게.
+fn display_summary(tool: &str, args: &serde_json::Value) -> String {
+    let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    match tool {
+        "shell.exec" => format!("$ {}", arg("command")),
+        "fs.read" | "fs.read_lines" => format!("📄 {}", arg("path")),
+        "fs.write" => format!("📝 {} ({}B)", arg("path"), arg("content").len()),
+        "fs.grep" => format!("🔍 \"{}\" in {}", arg("pattern"), arg("path")),
+        "fs.delete" => format!("🗑 {}", arg("path")),
+        "fs.mkdir" => format!("📁 {}", arg("path")),
+        "fs.move" => format!("📦 {} → {}", arg("from"), arg("to")),
+        "edit.apply" | "edit.replace_lines" => format!("✏️ {}", arg("path")),
+        "capture.screen" => "📸 화면 캡처".into(),
+        "ax.read" => "🔎 화면 요소 읽기".into(),
+        "ax.list_elements" => "🌳 UI 요소 트리".into(),
+        "input.click" => format!("👆 클릭 ({}, {})", arg("x"), arg("y")),
+        "input.click_element" => format!("👆 클릭: {}", arg("element")),
+        "input.type" => format!("⌨️ 입력: \"{}\"", truncate(arg("text"), 40)),
+        _ => tool.to_string(),
     }
 }
 
