@@ -7,11 +7,17 @@ import SwiftUI
 /// 수동 런루프 + accessory 정책이 SPM 메뉴바 앱의 표준 패턴이다.
 @main
 enum AutomatonEntry {
+    /// NSApplication.delegate는 weak 참조 — 지역변수가 조기 해제되면
+    /// MenuBarController와 NSStatusItem이 함께 해제되어 메뉴바 아이콘이 사라진다.
+    /// static 강한 참조로 생명주기를 앱 수명과 일치시킨다.
+    @MainActor private static var retained: AnyObject?
+
     static func main() {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory) // 메뉴바 전용, Dock 아이콘 없음
 
         let delegate = AutomatonAppDelegate()
+        AutomatonEntry.retained = delegate // strong ref — delegate 조기 해제 방지
         app.delegate = delegate
 
         app.run()
@@ -186,10 +192,21 @@ final class ShellModel {
         }
     }
 
-    /// 스트리밍 델타 — 마지막 에이전트 엔트리에 병합(토큰마다 애니메이션 없음)
+    /// 스트리밍 델타 — 마지막 에이전트 엔트리에 병합하되, 문단 경계(\n\n)에서 새 버블 분리.
+    /// 하나의 버블에 셸 출력+분석이 몰리는 것을 방지 — 각 문단이 독립 버블이 됨.
     private func appendDelta(_ delta: String) {
         if let last = stream.last, last.role == .agent {
             stream[stream.count - 1].content += delta
+            // 문단 분리 — 마지막 \n\n에서 잘라 새 버블 시작 (짧은 문단은 그대로 유지)
+            let content = stream[stream.count - 1].content
+            if content.contains("\n\n"), let range = content.range(of: "\n\n", options: .backwards) {
+                let before = String(content[content.startIndex..<range.lowerBound])
+                let after = String(content[range.upperBound...])
+                if !after.isEmpty {
+                    stream[stream.count - 1].content = before
+                    stream.append(ChatEntry(role: .agent, content: after))
+                }
+            }
         } else {
             stream.append(ChatEntry(role: .agent, content: delta))
         }

@@ -69,7 +69,7 @@ enum ChatPalette {
 /// 역할별 대화 버블 — 사용자=우측 황동, 에이전트=좌측 월넛 패널, 툴/오류=라인형
 struct ChatBubble: View {
     let entry: ChatEntry
-
+    @State private var expanded = false
     var body: some View {
         switch entry.role {
         case .user: userBubble
@@ -114,21 +114,29 @@ struct ChatBubble: View {
         }
     }
 
-    /// 툴 실행 — 상태 아이콘(⚙ 실행중/✓ 성공/✗ 실패) + 작은 모노스페이스 요약
+    /// 툴 실행 — 접이식: 기본 2줄, 클릭하면 전체 출력 펼침
     private var toolLine: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
+        let isLong = entry.content.count > 80
+        return HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(String(entry.content.prefix(1)))
                 .font(.system(size: 11))
                 .foregroundStyle(toolStatusColor)
             Text(String(entry.content.dropFirst()).trimmingCharacters(in: .whitespaces))
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(Theme.dim)
-                .lineLimit(2)
+                .lineLimit(expanded ? nil : 2)
                 .truncationMode(.tail)
                 .textSelection(.enabled)
+            if isLong {
+                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Theme.brass.opacity(0.6))
+            }
             Spacer(minLength: 0)
         }
         .padding(.leading, 4)
+        .contentShape(Rectangle())
+        .onTapGesture { if isLong { expanded.toggle() } }
     }
 
     private var toolStatusColor: Color {
