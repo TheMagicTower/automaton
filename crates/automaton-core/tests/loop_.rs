@@ -45,16 +45,13 @@ fn tmp(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn builtin_profiles_resolve_every_tool_in_matching_registry() {
-    // 프로파일이 레지스트리에 없는 툴을 나열하면 build_request에서 조용히 누락된다 — 회귀 가드
-    let code = ModeProfile::builtin(Mode::Code);
-    let reg = Registry::coding_set();
-    for n in &code.tools {
-        assert!(reg.get(n).is_some(), "code 프로파일의 {n}이(가) coding_set에 없음");
-    }
-    let mac = ModeProfile::builtin(Mode::Mac);
-    let mreg = Registry::mac_set();
-    for n in &mac.tools {
-        assert!(mreg.get(n).is_some(), "mac 프로파일의 {n}이(가) mac_set에 없음");
+    // 전 모드 통합 툴셋 — 프로파일의 모든 툴이 unified_set에 존재해야 한다 (회귀 가드)
+    let reg = Registry::unified_set();
+    for mode in [Mode::Code, Mode::Mac, Mode::Chat] {
+        let profile = ModeProfile::builtin(mode);
+        for n in &profile.tools {
+            assert!(reg.get(n).is_some(), "{mode:?} 프로파일의 {n}이(가) unified_set에 없음");
+        }
     }
 }
 

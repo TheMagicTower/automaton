@@ -188,9 +188,7 @@ final class ShellModel {
     /// 신규 엔트리 — 부드러운 슬라이드업 트랜지션으로 등장
     private func appendEntry(_ role: UserRole, _ content: String) {
         let entry = ChatEntry(role: role, content: content)
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
-            stream.append(entry)
-        }
+        stream.append(entry) // withAnimation 제거 — 지연 렌더링 방지, 사용자 메시지 즉시 표시
         schedulePersist()
     }
 

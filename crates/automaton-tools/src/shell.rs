@@ -8,7 +8,16 @@ use crate::{Tool, ToolError};
 use automaton_policy::Category;
 use serde_json::Value;
 
-const READ_PREFIXES: &[&str] = &["ls", "cat", "head", "tail", "pwd", "which", "file", "wc"];
+const READ_PREFIXES: &[&str] = &[
+    "ls", "cat", "head", "tail", "pwd", "which", "file", "wc",
+    // 진단·조사 명령 — 부수효과 없는 출력 전용
+    "du", "df", "ps", "uname", "date", "uptime", "sw_vers", "sysctl", "hostname", "id",
+    "whoami", "groups", "stat", "realpath", "basename", "dirname", "md5sum", "shasum", "shasum5",
+    "grep", "find", "diff", "sort", "uniq", "wc", "column", "jq", "plutil", "defaults read",
+    "system_profiler", "ioreg", "lsof", "netstat", "ifconfig", "ping", "dig", "nslookup", "host",
+    "cargo --version", "cargo --list", "rustc --version", "rustup show",
+    "node --version", "npm --version", "python3 --version", "swift --version",
+];
 // F-01: 빌드·테스트 러너(make, pytest, npm test, cargo build/test/check, swift build/test)는
 // 정의상 임의 코드 실행기다(make 레시피 = /bin/sh -c, conftest.py, package.json scripts, build.rs, SPM 플러그인).
 // fs.write(Write=자동 Allow)와 체이닝하면 무승인 RCE가 되므로 Write 자동허용 목록에서 제거해

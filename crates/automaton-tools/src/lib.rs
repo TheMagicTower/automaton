@@ -33,7 +33,30 @@ impl Registry {
         self.tools.iter().map(|t| t.as_ref() as &dyn Tool).find(|t| t.name() == name)
     }
     pub fn names(&self) -> Vec<&'static str> { self.tools.iter().map(|t| t.name()).collect() }
-    /// mac 모드 툴셋 (§5)
+    /// 전 모드 통합 툴셋 — 모든 도구 등록, 안전은 Policy Engine이 담당 (모드 통합 설계)
+    pub fn unified_set() -> Self {
+        let mut r = Registry::new();
+        // 코딩 도구
+        r.register(Box::new(FsRead));
+        r.register(Box::new(FsReadLines));
+        r.register(Box::new(FsWrite));
+        r.register(Box::new(FsGrep));
+        r.register(Box::new(FsDelete));
+        r.register(Box::new(FsMkdir));
+        r.register(Box::new(FsMove));
+        r.register(Box::new(ShellExec));
+        r.register(Box::new(EditApply));
+        r.register(Box::new(EditReplaceLines));
+        // mac 도구
+        r.register(Box::new(CaptureScreen));
+        r.register(Box::new(AxRead));
+        r.register(Box::new(AxListElements));
+        r.register(Box::new(InputClick));
+        r.register(Box::new(InputClickElement));
+        r.register(Box::new(InputType));
+        r
+    }
+    /// mac 모드 툴셋 (§5) — 레거시 호환
     pub fn mac_set() -> Self {
         let mut r = Registry::new();
         r.register(Box::new(CaptureScreen));

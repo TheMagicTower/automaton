@@ -273,7 +273,7 @@ impl Daemon {
 
     async fn run_session(self: Arc<Self>, session: &str, text: &str, tx: mpsc::UnboundedSender<Event>) {
         let mode = *self.sessions.lock().get(session).unwrap_or(&Mode::Chat);
-        let registry = match mode { Mode::Mac => automaton_tools::Registry::mac_set(), _ => automaton_tools::Registry::coding_set() };
+        let registry = automaton_tools::Registry::unified_set(); // 전 모드 동일 툴셋 — 안전은 Policy Engine이 담당
         let engine = self.engine.lock().clone();
 
         // 시스템 프롬프트: 세션당 안정(캐시 프리픽스 보존) — 사용자 텍스트로 변하지 않음.
