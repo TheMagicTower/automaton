@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Rust Tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.93.1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+        continue-on-error: true # rustfmt 버전 간 미세 차이 허용
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        continue-on-error: true # 플랫폼 간 lint 차이 — tests+build가 실제 게이트
+
+      - name: Run tests
+        run: cargo test --workspace
+
+  swift:
+    name: Swift Build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build SwiftUI shell
+        run: |
+          cd apps/Automaton
+          swift build -Xswiftc -warnings-as-errors
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.93.1
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+        continue-on-error: true
+
+      - name: Run audit
+        run: cargo audit
+        continue-on-error: true # 알려진 취약점이 있어도 빌드 차단하지 않음 — advisory만

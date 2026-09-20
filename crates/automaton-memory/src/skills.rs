@@ -8,7 +8,9 @@ pub struct SkillMeta {
 }
 
 #[derive(Debug)]
-pub struct SkillIndex { pub skills: Vec<SkillMeta> }
+pub struct SkillIndex {
+    pub skills: Vec<SkillMeta>,
+}
 
 impl SkillIndex {
     pub fn scan(dir: &std::path::Path) -> std::io::Result<Self> {
@@ -19,23 +21,40 @@ impl SkillIndex {
         };
         for entry in entries.flatten() {
             let skill_md = entry.path().join("SKILL.md");
-            let Ok(raw) = std::fs::read_to_string(&skill_md) else { continue };
+            let Ok(raw) = std::fs::read_to_string(&skill_md) else {
+                continue;
+            };
             let (name, description) = parse_frontmatter(&raw, &entry.file_name().to_string_lossy());
-            skills.push(SkillMeta { name, description, path: skill_md });
+            skills.push(SkillMeta {
+                name,
+                description,
+                path: skill_md,
+            });
         }
         skills.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(SkillIndex { skills })
     }
 
-    pub fn len(&self) -> usize { self.skills.len() }
+    pub fn len(&self) -> usize {
+        self.skills.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty()
+    }
     pub fn system_prompt_lines(&self) -> Vec<String> {
-        self.skills.iter().map(|s| format!("- {}: {}", s.name, s.description)).collect()
+        self.skills
+            .iter()
+            .map(|s| format!("- {}: {}", s.name, s.description))
+            .collect()
     }
 }
 
 impl std::ops::Deref for SkillIndex {
     type Target = [SkillMeta];
-    fn deref(&self) -> &[SkillMeta] { &self.skills }
+    fn deref(&self) -> &[SkillMeta] {
+        &self.skills
+    }
 }
 
 impl SkillMeta {
@@ -53,10 +72,21 @@ fn parse_frontmatter(raw: &str, fallback_name: &str) -> (String, String) {
     let mut in_fm = false;
     for line in raw.lines() {
         let t = line.trim();
-        if t == "---" { if in_fm { break; } else { in_fm = true; continue; } }
+        if t == "---" {
+            if in_fm {
+                break;
+            } else {
+                in_fm = true;
+                continue;
+            }
+        }
         if in_fm {
-            if let Some(v) = t.strip_prefix("name:") { name = v.trim().to_string(); }
-            if let Some(v) = t.strip_prefix("description:") { description = v.trim().to_string(); }
+            if let Some(v) = t.strip_prefix("name:") {
+                name = v.trim().to_string();
+            }
+            if let Some(v) = t.strip_prefix("description:") {
+                description = v.trim().to_string();
+            }
         }
     }
     (name, description)
@@ -68,9 +98,19 @@ fn strip_frontmatter(raw: &str) -> String {
     let mut seen_first = false;
     for line in raw.lines() {
         let t = line.trim();
-        if t == "---" && !seen_first { in_fm = true; seen_first = true; continue; }
-        if t == "---" && in_fm { in_fm = false; continue; }
-        if !in_fm { out.push_str(line); out.push('\n'); }
+        if t == "---" && !seen_first {
+            in_fm = true;
+            seen_first = true;
+            continue;
+        }
+        if t == "---" && in_fm {
+            in_fm = false;
+            continue;
+        }
+        if !in_fm {
+            out.push_str(line);
+            out.push('\n');
+        }
     }
     out
 }

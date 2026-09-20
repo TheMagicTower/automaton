@@ -6,43 +6,79 @@ use automaton_proto::{ActionInfo, Hint};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApprenticeError {
-    #[error("memory: {0}")] Memory(#[from] automaton_memory::MemoryError),
+    #[error("memory: {0}")]
+    Memory(#[from] automaton_memory::MemoryError),
 }
 
 pub type Result<T, E = ApprenticeError> = std::result::Result<T, E>;
 
-pub struct Apprentice { store: MemoryStore }
+pub struct Apprentice {
+    store: MemoryStore,
+}
 
 impl Apprentice {
     pub fn open(db_path: &std::path::Path) -> Result<Self> {
-        Ok(Apprentice { store: MemoryStore::open(db_path)? })
+        Ok(Apprentice {
+            store: MemoryStore::open(db_path)?,
+        })
     }
 
     /// 모든 정책 결정 기록 — allow 포함 (§5 감사 데이터가 학습 데이터가 된다)
-    pub fn note_decision(&self, session: &str, action: &ActionInfo, verdict: &str, decision: &str) -> Result<()> {
-        Ok(self.store.record_decision(session, &action.tool, &action.target, verdict, decision)?)
+    pub fn note_decision(
+        &self,
+        session: &str,
+        action: &ActionInfo,
+        verdict: &str,
+        decision: &str,
+    ) -> Result<()> {
+        Ok(self
+            .store
+            .record_decision(session, &action.tool, &action.target, verdict, decision)?)
     }
 
     /// 유사 과거 승인 검색 → 승인 배너 힌트. 승인만 집계(거절은 힌트 근거 아님).
     /// OR 접두 쿼리로 후보 수집 → Rust측 토큰 중첩(≥2, 단일 토큰 쿼리는 1) 랭킹.
     /// AND 결합은 파일명만 달라도 0히트로 힌트가 사실상 발화하지 않음(실측).
     pub fn hint_for(&self, action: &ActionInfo) -> Result<Option<Hint>> {
-        let tokens: Vec<String> = action.target.split(|c: char| !c.is_alphanumeric())
-            .filter(|t| !t.is_empty()).map(|t| t.to_lowercase()).collect();
-        if tokens.is_empty() { return Ok(None); }
-        let query = tokens.iter().map(|t| format!("\"{t}\"*")).collect::<Vec<_>>().join(" OR ");
+        let tokens: Vec<String> = action
+            .target
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_lowercase())
+            .collect();
+        if tokens.is_empty() {
+            return Ok(None);
+        }
+        let query = tokens
+            .iter()
+            .map(|t| format!("\"{t}\"*"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
         let hits = self.store.search_decisions_fts(&query)?;
         let min_overlap = if tokens.len() == 1 { 1 } else { 2 };
         let mut approvals = 0u32;
         for d in hits {
-            if d.decision != "approve" || d.tool != action.tool { continue; }
-            let past: std::collections::HashSet<String> = d.target.split(|c: char| !c.is_alphanumeric())
-                .filter(|t| !t.is_empty()).map(|t| t.to_lowercase()).collect();
+            if d.decision != "approve" || d.tool != action.tool {
+                continue;
+            }
+            let past: std::collections::HashSet<String> = d
+                .target
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|t| !t.is_empty())
+                .map(|t| t.to_lowercase())
+                .collect();
             let overlap = tokens.iter().filter(|t| past.contains(*t)).count();
-            if overlap >= min_overlap { approvals += 1; }
+            if overlap >= min_overlap {
+                approvals += 1;
+            }
         }
-        if approvals == 0 { return Ok(None); }
-        Ok(Some(Hint { text: format!("지난번 유사 상황에서 승인({approvals}회)"), similar_count: approvals }))
+        if approvals == 0 {
+            return Ok(None);
+        }
+        Ok(Some(Hint {
+            text: format!("지난번 유사 상황에서 승인({approvals}회)"),
+            similar_count: approvals,
+        }))
     }
 }
 
@@ -57,7 +93,9 @@ pub struct PreferenceScore {
     pub suggested_default: bool,
 }
 
-pub struct PreferenceScorer<'a> { apprentice: &'a Apprentice }
+pub struct PreferenceScorer<'a> {
+    apprentice: &'a Apprentice,
+}
 
 impl PreferenceScorer<'_> {
     /// 툴별 승인/거절 이력 기반 P(approve) 점수.
@@ -73,7 +111,11 @@ impl PreferenceScorer<'_> {
             }
         }
         let n = approve + deny;
-        let probability = if n == 0 { 0.5 } else { approve as f64 / n as f64 };
+        let probability = if n == 0 {
+            0.5
+        } else {
+            approve as f64 / n as f64
+        };
         let confidence = if n >= 3 { 1.0 } else { n as f64 / 3.0 };
         Ok(PreferenceScore {
             probability,
@@ -99,11 +141,19 @@ pub struct DraftComposer;
 impl DraftComposer {
     /// 동일 툴 과거 승인 3회 이상일 때만 초안 생성 — 근거 없는 초안은
     /// 승인 벼락(automation bias)을 부추긴다. 이력 부족 시 빈 벡터.
-    pub fn generate_drafts(&self, tool: &str, target: &str, past_decisions: &[Decision]) -> Vec<String> {
-        let approvals = past_decisions.iter()
+    pub fn generate_drafts(
+        &self,
+        tool: &str,
+        target: &str,
+        past_decisions: &[Decision],
+    ) -> Vec<String> {
+        let approvals = past_decisions
+            .iter()
             .filter(|d| d.tool == tool && d.decision == "approve")
             .count();
-        if approvals < 3 { return Vec::new(); }
+        if approvals < 3 {
+            return Vec::new();
+        }
         vec![
             "진행해".into(),
             "허용".into(),

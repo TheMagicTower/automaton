@@ -1,5 +1,4 @@
-.superpowers/
-.worktrees/
 /target
 !reference/
 .build/
+/build/

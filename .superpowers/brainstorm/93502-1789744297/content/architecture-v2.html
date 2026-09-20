@@ -1,0 +1,60 @@
+<h2>automaton — 전체 아키텍처 v2 (섹션 1/5, 개정)</h2>
+<p class="subtitle">추가: 온디바이스 학습 모듈 "Apprentice Engine" — 의사결정 학습 → 자동완성으로 발전</p>
+
+<div class="mockup">
+  <div class="mockup-header">시스템 구조도 v2</div>
+  <div class="mockup-body" style="font-family:ui-monospace,monospace;font-size:13px;line-height:1.5;">
+    <div style="border:2px solid #b08d57;border-radius:10px;padding:14px;margin-bottom:10px;background:rgba(176,141,87,.07);">
+      <div style="font-weight:700;color:#b08d57;">SwiftUI Shell — 메뉴바 앱</div>
+      <div style="color:#888;">대화 스트림 · 모드 인디케이터 · <b style="color:#c9a227;">승인 배너(과거 결정 힌트+기본값)</b> · <b style="color:#c9a227;">답장 초안 칩(클릭 수락)</b></div>
+    </div>
+    <div style="text-align:center;color:#b08d57;">↕&nbsp; JSON-RPC over Unix domain socket</div>
+    <div style="border:2px solid #8a7a5c;border-radius:10px;padding:14px;margin-top:10px;background:rgba(138,122,92,.06);">
+      <div style="font-weight:700;margin-bottom:8px;">automaton core — Rust 데몬 (<code>automatond</code>)</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <div style="border:1px solid #666;border-radius:6px;padding:8px;"><b>Session Orchestrator</b><br><span style="color:#888;">모드별 프롬프트·툴셋·권한</span></div>
+        <div style="border:1px solid #666;border-radius:6px;padding:8px;"><b>Agent Loop</b><br><span style="color:#888;">tool-calling · 스트리밍</span></div>
+        <div style="border:1px solid #666;border-radius:6px;padding:8px;"><b>Policy Engine</b><br><span style="color:#888;">결정론적 위험 판정 (최종 권한)</span></div>
+        <div style="border:1px solid #666;border-radius:6px;padding:8px;"><b>Providers</b><br><span style="color:#888;">메인 LLM · 기존 키 재사용</span></div>
+        <div style="border:1px solid #666;border-radius:6px;padding:8px;"><b>Tool Registry</b><br><span style="color:#888;">coding / mac 툴셋</span></div>
+        <div style="border:1px solid #666;border-radius:6px;padding:8px;"><b>Memory · Skills</b><br><span style="color:#888;">SQLite + 마크다운 스킬</span></div>
+      </div>
+      <div style="border:2px solid #c9a227;border-radius:8px;padding:12px;margin-top:10px;background:rgba(201,162,39,.08);">
+        <div style="font-weight:700;color:#c9a227;">⚙ Apprentice Engine (신규) — 이벤트 기반, 루프와 분리</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;">
+          <div style="border:1px solid #a08020;border-radius:6px;padding:8px;"><b>Decision Journal</b><br><span style="color:#888;">대화·승인/거절·수락 이벤트 전량 기록</span></div>
+          <div style="border:1px solid #a08020;border-radius:6px;padding:8px;"><b>Embedding 서비스</b><br><span style="color:#888;">소형 gguf/ONNX 임베더 → sqlite-vec</span></div>
+          <div style="border:1px solid #a08020;border-radius:6px;padding:8px;"><b>Draft Composer</b><br><span style="color:#888;">1~2B 로컬 LM (llama.cpp·Metal)</span></div>
+        </div>
+        <div style="color:#888;margin-top:6px;">입력: 세션 이벤트 버스 구독 &nbsp;|&nbsp; 출력: 힌트·기본값·초안 (참고용 어드바이저)</div>
+      </div>
+    </div>
+    <div style="text-align:center;color:#b08d57;margin-top:8px;">↕ macOS API</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;">
+      <div style="border:1px dashed #666;border-radius:6px;padding:8px;text-align:center;">Accessibility API</div>
+      <div style="border:1px dashed #666;border-radius:6px;padding:8px;text-align:center;">ScreenCaptureKit</div>
+      <div style="border:1px dashed #666;border-radius:6px;padding:8px;text-align:center;">CGEvent</div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Apprentice Engine 3단계 로드맵</h3>
+  <table style="width:100%;border-collapse:collapse;font-size:14px;">
+    <tr style="border-bottom:1px solid #555;"><td style="padding:6px;"><b>① 결정 저널 + 유사 결정 검색</b></td><td style="padding:6px;">kNN 검색만 사용(학습 없음). 승인 배너에 "지난번 유사 상황에서 승인함" 힌트 표시. 즉시 가치</td></tr>
+    <tr style="border-bottom:1px solid #555;"><td style="padding:6px;"><b>② 선호 스코어러</b></td><td style="padding:6px;">임베딩 위 소형 분류기로 P(승인) 예측 → 배너 기본값 사전 선택. 정책 우회 없음</td></tr>
+    <tr><td style="padding:6px;"><b>③ 답장 자동완성</b></td><td style="padding:6px;">로컬 소형 LM이 내 답변 초안 생성 → 입력창 칩으로 표시 → <b>클릭만 하면 전송</b>. 성공률 충분할 때 활성화</td></tr>
+  </table>
+  <p class="subtitle" style="margin-top:8px;">안전장치: Apprentice 출력은 어드바이저. 실행 권한은 언제나 Policy Engine(결정론적)이 최종 판단.</p>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="approve" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content"><h3>이 구조로 진행</h3><p>아키텍처 확정 — 다음 섹션(모드·권한 시스템)으로</p></div>
+  </div>
+  <div class="option" data-choice="revise" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content"><h3>추가 수정 있음</h3><p>터미널에서 말씀해 주세요</p></div>
+  </div>
+</div>

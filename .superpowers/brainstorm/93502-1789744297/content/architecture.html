@@ -1,0 +1,63 @@
+<h2>automaton — 전체 아키텍처 (섹션 1/5)</h2>
+<p class="subtitle">Rust 코어 + 얇은 SwiftUI 쉘. 모든 로직은 Rust에, Swift는 창구만.</p>
+
+<div class="mockup">
+  <div class="mockup-header">시스템 구조도</div>
+  <div class="mockup-body" style="font-family:ui-monospace,monospace;font-size:13px;line-height:1.5;">
+    <div style="border:2px solid #b08d57;border-radius:10px;padding:14px;margin-bottom:10px;background:rgba(176,141,87,.07);">
+      <div style="font-weight:700;color:#b08d57;">SwiftUI Shell — 메뉴바 앱</div>
+      <div style="color:#888;">대화 스트림 · 모드 인디케이터 · 승인 배너 · 글로벌 단축키 · 오버레이 프리뷰</div>
+    </div>
+    <div style="text-align:center;color:#b08d57;">↕&nbsp; JSON-RPC over Unix domain socket (루즈 커플링)</div>
+    <div style="border:2px solid #8a7a5c;border-radius:10px;padding:14px;margin-top:10px;background:rgba(138,122,92,.06);">
+      <div style="font-weight:700;margin-bottom:8px;">automaton core — Rust 데몬 (<code>automatond</code>, 단일 바이너리 · headless 실행 가능)</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <div style="border:1px solid #666;border-radius:6px;padding:8px;">
+          <b>Session Orchestrator</b><br><span style="color:#888;">모드별 프롬프트·툴셋·권한 프로파일</span>
+        </div>
+        <div style="border:1px solid #666;border-radius:6px;padding:8px;">
+          <b>Agent Loop</b><br><span style="color:#888;">tool-calling 루프 · 스트리밍 · 컨텍스트 관리</span>
+        </div>
+        <div style="border:1px solid #666;border-radius:6px;padding:8px;">
+          <b>Policy Engine</b><br><span style="color:#888;">결정론적 위험 판정 → 승인 이벤트 발행</span>
+        </div>
+        <div style="border:1px solid #666;border-radius:6px;padding:8px;">
+          <b>Providers</b><br><span style="color:#888;">OpenAI 호환 클라이언트 · 기존 키 재사용</span>
+        </div>
+        <div style="border:1px solid #666;border-radius:6px;padding:8px;">
+          <b>Tool Registry</b><br><span style="color:#888;">coding: fs·shell·edit·grep / mac: capture·AX·click·type</span>
+        </div>
+        <div style="border:1px solid #666;border-radius:6px;padding:8px;">
+          <b>Memory · Skills</b><br><span style="color:#888;">SQLite 세션/검색 + 마크다운 스킬 (agentskills 호환)</span>
+        </div>
+      </div>
+    </div>
+    <div style="text-align:center;color:#b08d57;margin-top:8px;">↕ macOS API</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;">
+      <div style="border:1px dashed #666;border-radius:6px;padding:8px;text-align:center;">Accessibility API<br><span style="color:#888;">AXUIElement 트리</span></div>
+      <div style="border:1px dashed #666;border-radius:6px;padding:8px;text-align:center;">ScreenCaptureKit<br><span style="color:#888;">화면·윈도우 캡처</span></div>
+      <div style="border:1px dashed #666;border-radius:6px;padding:8px;text-align:center;">CGEvent<br><span style="color:#888;">클릭·타이핑 주입</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>이 구조의 핵심 결정</h3>
+  <ul>
+    <li><b>코어가 데몬, 쉘이 클라이언트</b> — SwiftUI 앱이 죽어도 세션이 살고, CLI/TUI를 나중에 얹기만 하면 됨. headless 테스트 가능.</li>
+    <li><b>Swift↔Rust는 JSON-RPC 한 겹</b> — Swift 쪽 코드량 최소화, 브리지 버그 감소.</li>
+    <li><b>권한 정책이 루프 안에</b> — 모든 툴 호출이 Policy Engine을 통과해야 실행 (OpenClaw의 "결정론적 정책" 차용).</li>
+    <li><b>코딩 툴과 맥 툴이 같은 레지스트리</b> — 모드는 툴셋 조합일 뿐, 별도 엔진 아님.</li>
+  </ul>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="approve" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content"><h3>이 구조로 진행</h3><p>아키텍처 확정, 다음 섹션(모드·권한 시스템)으로</p></div>
+  </div>
+  <div class="option" data-choice="revise" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content"><h3>수정하고 싶은 부분 있음</h3><p>터미널에서 어떤 점을 바꿀지 말씀해 주세요</p></div>
+  </div>
+</div>

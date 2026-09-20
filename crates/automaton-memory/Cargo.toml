@@ -3,10 +3,11 @@ name = "automaton-memory"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "SQLite-based memory store for automaton"
 repository.workspace = true
 
 [dependencies]
-automaton-core = { path = "../automaton-core" }
+automaton-proto = { path = "../automaton-proto" }
 rusqlite.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true

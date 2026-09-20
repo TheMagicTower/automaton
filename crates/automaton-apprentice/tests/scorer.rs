@@ -2,23 +2,37 @@ use automaton_apprentice::Apprentice;
 use automaton_proto::ActionInfo;
 
 fn tmp(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("automaton-apprentice-scorer-{}-{name}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "automaton-apprentice-scorer-{}-{name}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("memory.db")
 }
 
 fn info(tool: &str, target: &str) -> ActionInfo {
-    ActionInfo { tool: tool.into(), target: target.into(), risk: String::new() }
+    ActionInfo {
+        tool: tool.into(),
+        target: target.into(),
+        risk: String::new(),
+    }
 }
 
 #[test]
 fn four_approvals_one_deny_is_exactly_threshold_not_default() {
     let a = Apprentice::open(&tmp("4a1d")).unwrap();
     for i in 0..4 {
-        a.note_decision("s1", &info("fs.delete", &format!("~/old-{i}.zip")), "ask", "approve").unwrap();
+        a.note_decision(
+            "s1",
+            &info("fs.delete", &format!("~/old-{i}.zip")),
+            "ask",
+            "approve",
+        )
+        .unwrap();
     }
-    a.note_decision("s2", &info("fs.delete", "~/old-9.zip"), "ask", "deny").unwrap();
+    a.note_decision("s2", &info("fs.delete", "~/old-9.zip"), "ask", "deny")
+        .unwrap();
     let s = a.preference_score("fs.delete").unwrap();
     assert_eq!(s.sample_count, 5);
     assert!((s.probability - 0.8).abs() < 1e-9); // 0.8은 >0.8이 아니므로 기본값 아님
@@ -29,7 +43,13 @@ fn four_approvals_one_deny_is_exactly_threshold_not_default() {
 fn five_approvals_suggest_default() {
     let a = Apprentice::open(&tmp("5a")).unwrap();
     for i in 0..5 {
-        a.note_decision("s1", &info("fs.write", &format!("~/note-{i}.md")), "ask", "approve").unwrap();
+        a.note_decision(
+            "s1",
+            &info("fs.write", &format!("~/note-{i}.md")),
+            "ask",
+            "approve",
+        )
+        .unwrap();
     }
     let s = a.preference_score("fs.write").unwrap();
     assert_eq!(s.sample_count, 5);
@@ -52,7 +72,13 @@ fn no_history_is_neutral_low_confidence() {
 fn other_tool_history_does_not_leak() {
     let a = Apprentice::open(&tmp("leak")).unwrap();
     for i in 0..3 {
-        a.note_decision("s1", &info("fs.write", &format!("~/a-{i}.txt")), "ask", "approve").unwrap();
+        a.note_decision(
+            "s1",
+            &info("fs.write", &format!("~/a-{i}.txt")),
+            "ask",
+            "approve",
+        )
+        .unwrap();
     }
     let s = a.preference_score("fs.delete").unwrap();
     assert_eq!(s.sample_count, 0);

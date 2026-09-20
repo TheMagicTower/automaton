@@ -3,6 +3,7 @@ name = "automaton-apprentice"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Learning module for automaton"
 repository.workspace = true
 
 [dependencies]
