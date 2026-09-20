@@ -66,13 +66,18 @@ actor DaemonConnection {
     }
 
     private func connect() {
-        let conn = NWConnection(to: .unix(path: socketPath), using: .tcp) // .unix(path:) — unixPath 아님 (실측)
+        let conn = NWConnection(to: .unix(path: socketPath), using: .tcp)
         connection = conn
         conn.stateUpdateHandler = { [weak self] state in
+            FileHandle.standardError.write(Data("[automaton] CONN STATE: \(state)\n".utf8))
             switch state {
-            case .ready: Task { await self?.flushPending() }
-            case .failed: Task { await self?.handleDisconnect() }
-            default: break
+            case .ready:
+                Task { await self?.flushPending() }
+            case .failed(let error):
+                FileHandle.standardError.write(Data("[automaton] CONN FAILED: \(error)\n".utf8))
+                Task { await self?.handleDisconnect() }
+            default:
+                break
             }
         }
         receiveLoop(conn)
@@ -96,8 +101,7 @@ actor DaemonConnection {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, done, error in
             guard let self else { return }
             if let data { Task { await self.consume(data) } }
-            if error != nil || done { Task { await self.handleDisconnect() } } // clean EOF도 종료 처리 — 무한 대기 방지 (리뷰 자문)
-            else { Task { await self.receiveLoop(conn) } } // #ActorIsolatedCall 경고 방지 (실측)
+            if error != nil || done { Task { await self.handleDisconnect() } }
         }
     }
 
@@ -106,7 +110,13 @@ actor DaemonConnection {
         while let nl = buffer.firstIndex(of: 0x0A) {
             let line = Data(buffer[buffer.startIndex..<nl])
             buffer = buffer[buffer.index(after: nl)...]
-            guard let ev = try? JSONDecoder().decode(ShellEvent.self, from: line) else { continue }
+            guard let ev = try? JSONDecoder().decode(ShellEvent.self, from: line) else {
+                FileHandle.standardError.write(Data("[automaton] DECODE FAIL: \(String(data: line, encoding: .utf8)?.prefix(120) ?? "?")\n".utf8))
+                continue
+            }
+            if case .approvalRequested = ev {
+                FileHandle.standardError.write(Data("[automaton] APPROVAL RECEIVED\n".utf8))
+            }
             continuation?.yield(ev)
         }
     }

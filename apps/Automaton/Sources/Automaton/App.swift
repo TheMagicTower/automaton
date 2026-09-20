@@ -72,14 +72,14 @@ final class ShellModel {
     var currentSessionID: String { session }
 
     init() {
-        // 저장된 세션 재사용 — 재시작해도 대화 맥락 유지
         let saved = UserDefaults.standard.string(forKey: "automaton.session")
         self.session = saved ?? "shell-\(UInt64(Date().timeIntervalSince1970))"
-        // 세션 목록 복원 — 현재 세션 캐시를 즉시 표시(데몬 history 도착 시 대체)
         self.sessions = SessionStore.load()
         if let rec = sessions.first(where: { $0.id == session }) {
             self.stream = rec.entries
         }
+        // 즉시 연결 — .onAppear 대기 없이 데몬 이벤트 수신 보장
+        start()
     }
 
     /// 새 세션 — 기존 대화 스트림 클리어 + 새 세션 ID로 재연결
