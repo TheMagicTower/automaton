@@ -212,6 +212,10 @@ impl Daemon {
                         let _ = tx.send(Event::StreamDelta { session: session.clone(), delta: text });
                     }
                 }
+                Request::Interrupt { session } => {
+                    // 사용자 중단 — 진행 중 턴에 오류 이벤트를 보내 셸이 즉시 제어권 회복
+                    let _ = tx.send(Event::Error { session: Some(session.clone()), message: "⛔ 사용자가 중단했습니다".into() });
+                }
                 Request::SessionList => {
                     // M1 미구현 — 무음 드롭 금지, 명시적 오류 응답
                     let _ = tx.send(Event::Error { session: None, message: "SessionList는 M1 미구현".into() });

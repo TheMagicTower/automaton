@@ -20,6 +20,8 @@ pub enum Request {
     ApprovalRespond { session: String, approval: String, decision: Decision, always: bool },
     ModeSwitch { session: String, to: Mode },
     HistoryGet { session: String, limit: usize },
+    /// 현재 턴 중단 — 장시간 셸 명령·응답 생성 취소
+    Interrupt { session: String },
     SessionList,
     /// 메모리 브라우저 (§7) — 전체 facts 페이지네이션 조회
     MemoryBrowse { offset: usize, limit: usize },

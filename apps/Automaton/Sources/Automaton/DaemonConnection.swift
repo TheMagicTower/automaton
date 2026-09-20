@@ -18,8 +18,11 @@ enum ShellEvent: Codable, Sendable {
     case draftSuggestions(session: String, suggestions: [String])
     case modeChanged(session: String, mode: Mode)
     case error(session: String?, message: String)
+    case usage(session: String)
+    case memoryData(session: String, facts: [String], total: Int)
+    case memoryStats(session: String, facts: Int, sessions: Int, decisions: Int)
 
-    enum CodingKeys: String, CodingKey { case type, session, delta, tool, summary, ok, approval, action, hint, mode, message, suggestions }
+    enum CodingKeys: String, CodingKey { case type, session, delta, tool, summary, ok, approval, action, hint, mode, message, suggestions, usage, facts, total, sessions, decisions }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -32,6 +35,9 @@ enum ShellEvent: Codable, Sendable {
         case "draft_suggestions": self = .draftSuggestions(session: try c.decode(String.self, forKey: .session), suggestions: try c.decode([String].self, forKey: .suggestions))
         case "mode_changed": self = .modeChanged(session: try c.decode(String.self, forKey: .session), mode: try c.decode(Mode.self, forKey: .mode))
         case "error": self = .error(session: try c.decodeIfPresent(String.self, forKey: .session), message: try c.decode(String.self, forKey: .message))
+        case "usage": self = .usage(session: try c.decode(String.self, forKey: .session))
+        case "memory_data": self = .memoryData(session: try c.decode(String.self, forKey: .session), facts: try c.decode([String].self, forKey: .facts), total: try c.decode(Int.self, forKey: .total))
+        case "memory_stats": self = .memoryStats(session: try c.decode(String.self, forKey: .session), facts: try c.decode(Int.self, forKey: .facts), sessions: try c.decode(Int.self, forKey: .sessions), decisions: try c.decode(Int.self, forKey: .decisions))
         default: throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "알 수 없는 이벤트: \(type)")
         }
     }

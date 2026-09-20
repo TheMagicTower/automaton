@@ -138,29 +138,34 @@ struct ComposerBar: View {
         model.send(text)
     }
 
+    @ViewBuilder
     private var sendButton: some View {
-        Button(action: send) {
-            Group {
-                if model.isThinking {
-                    // 로딩 애니메이션 — 본체 톱니 인디케이터와 동일 리듬(2s/회전)
-                    TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
-                        let angle = (timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 2.0)) / 2.0 * 360.0
-                        Image(systemName: "gearshape.fill")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(Theme.brass)
-                            .rotationEffect(.degrees(angle))
-                    }
-                } else {
-                    Image(systemName: "paperplane.fill")
-                        .font(.system(size: 14))
-                        .foregroundStyle(canSend ? Theme.gold : Theme.dim.opacity(0.5))
-                }
+        if model.isThinking {
+            // 중단 버튼 — 실행 중 툴/응답 생성을 멈춤
+            Button(action: interrupt) {
+                Image(systemName: "stop.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.red.opacity(0.8))
             }
-            .frame(width: 30, height: 30)
+            .buttonStyle(.plain)
+            .help("중단 (실행 중인 작업 취소)")
+        } else {
+            Button(action: send) {
+                Image(systemName: "paperplane.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(canSend ? Theme.gold : Theme.dim.opacity(0.5))
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSend)
+            .help("전송 (Enter)")
         }
-        .buttonStyle(.plain)
-        .disabled(!canSend)
-        .help(model.isThinking ? "응답 대기 중…" : "전송 (Enter)")
+    }
+
+    private func interrupt() {
+        model.isThinking = false
+        model.appendEntry(.tool, "⛔ 사용자가 중단했습니다")
+        Task { await model.interruptCurrent() }
     }
 
     private var hintRow: some View {

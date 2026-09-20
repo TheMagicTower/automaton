@@ -147,11 +147,13 @@ final class ShellModel {
                 appendDelta(delta)
             }
             voiceOutput.append(delta: delta)
-        case .toolStarted(_, let tool, _):
-            appendEntry(.tool, "⚙ \(tool)")
+        case .toolStarted(_, _, let summary):
+            isThinking = true // 툴 실행 중 인디케이터 — 셸 명령 등 장시간 실행 시각화
+            appendEntry(.tool, "⚙ \(summary)")
             voiceOutput.flush()
         case .toolResult(_, let tool, let ok, let summary):
-            appendEntry(.tool, ok ? "✓ \(tool)" : "✗ \(tool): \(summary)")
+            isThinking = true // 턴 계속 진행 — 다음 툴/텍스트 대기
+            appendEntry(.tool, ok ? "✓ \(summary)" : "✗ \(tool): \(summary)")
         case .approvalRequested(_, let id, let action, let hint):
             pendingApproval = (id, action, hint)
             draftSuggestions = []
@@ -159,6 +161,14 @@ final class ShellModel {
             draftSuggestions = suggestions
         case .modeChanged(_, let mode):
             self.mode = mode
+        case .usage:
+            isThinking = false // 턴 종료 — usage 이벤트에서 확실히 해제
+        case .memoryData(_, let facts, let total):
+            memoryCount = total
+            appendEntry(.tool, "🧠 기억 \(total)건: \(facts.prefix(3).joined(separator: ", "))")
+        case .memoryStats(_, let facts, let sessions, let decisions):
+            memoryCount = facts
+            appendEntry(.tool, "📊 기억 \(facts)건 · 세션 \(sessions)개 · 결정 \(decisions)건")
         case .error(_, let message):
             isThinking = false
             appendEntry(.error, message)
@@ -168,7 +178,8 @@ final class ShellModel {
     private static func sessionOf(_ ev: ShellEvent) -> String? {
         switch ev {
         case .streamDelta(let s, _), .toolStarted(let s, _, _), .toolResult(let s, _, _, _),
-             .approvalRequested(let s, _, _, _), .draftSuggestions(let s, _), .modeChanged(let s, _):
+             .approvalRequested(let s, _, _, _), .draftSuggestions(let s, _), .modeChanged(let s, _),
+             .usage(let s), .memoryData(let s, _, _), .memoryStats(let s, _, _, _):
             return s
         case .error(let s, _):
             return s
@@ -186,7 +197,7 @@ final class ShellModel {
     }
 
     /// 신규 엔트리 — 부드러운 슬라이드업 트랜지션으로 등장
-    private func appendEntry(_ role: UserRole, _ content: String) {
+    func appendEntry(_ role: UserRole, _ content: String) { // internal — InputComposer interrupt에서 접근
         let entry = ChatEntry(role: role, content: content)
         stream.append(entry) // withAnimation 제거 — 지연 렌더링 방지, 사용자 메시지 즉시 표시
         schedulePersist()
@@ -197,9 +208,8 @@ final class ShellModel {
         guard !trimmed.isEmpty else { return }
         voiceOutput.interrupt()
         isThinking = true
-        historyPending = false // 대기 중 history가 사용자 메시지 직후 델타를 blob으로 오인 방지
+        historyPending = false
         appendEntry(.user, trimmed)
-        Task { await conn.sendRequest(method: "message_send", params: ["session": session, "text": trimmed]) }
     }
 
     func requestMode(_ to: Mode) {
@@ -210,6 +220,11 @@ final class ShellModel {
         guard let p = pendingApproval else { return }
         Task { await conn.sendRequest(method: "approval_respond", params: ["session": session, "approval": p.id, "decision": approve ? "approve" : "deny", "always": always]) }
         pendingApproval = nil
+    }
+
+    /// 현재 턴 중단 — 데몬에 interrupt 요청, UI 상태 즉시 리셋
+    func interruptCurrent() async {
+        await conn.sendRequest(method: "interrupt", params: ["session": session])
     }
 
     // MARK: - 세션 영속화 (UserDefaults)
