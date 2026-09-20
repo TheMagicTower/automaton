@@ -9,14 +9,61 @@ use automaton_policy::Category;
 use serde_json::Value;
 
 const READ_PREFIXES: &[&str] = &[
-    "ls", "cat", "head", "tail", "pwd", "which", "file", "wc",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "pwd",
+    "which",
+    "file",
+    "wc",
     // 진단·조사 명령 — 부수효과 없는 출력 전용
-    "du", "df", "ps", "uname", "date", "uptime", "sw_vers", "sysctl", "hostname", "id",
-    "whoami", "groups", "stat", "realpath", "basename", "dirname", "md5sum", "shasum", "shasum5",
-    "grep", "find", "diff", "sort", "uniq", "wc", "column", "jq", "plutil", "defaults read",
-    "system_profiler", "ioreg", "lsof", "netstat", "ifconfig", "ping", "dig", "nslookup", "host",
-    "cargo --version", "cargo --list", "rustc --version", "rustup show",
-    "node --version", "npm --version", "python3 --version", "swift --version",
+    "du",
+    "df",
+    "ps",
+    "uname",
+    "date",
+    "uptime",
+    "sw_vers",
+    "sysctl",
+    "hostname",
+    "id",
+    "whoami",
+    "groups",
+    "stat",
+    "realpath",
+    "basename",
+    "dirname",
+    "md5sum",
+    "shasum",
+    "shasum5",
+    "grep",
+    "find",
+    "diff",
+    "sort",
+    "uniq",
+    "wc",
+    "column",
+    "jq",
+    "plutil",
+    "defaults read",
+    "system_profiler",
+    "ioreg",
+    "lsof",
+    "netstat",
+    "ifconfig",
+    "ping",
+    "dig",
+    "nslookup",
+    "host",
+    "cargo --version",
+    "cargo --list",
+    "rustc --version",
+    "rustup show",
+    "node --version",
+    "npm --version",
+    "python3 --version",
+    "swift --version",
 ];
 // F-01: 빌드·테스트 러너(make, pytest, npm test, cargo build/test/check, swift build/test)는
 // 정의상 임의 코드 실행기다(make 레시피 = /bin/sh -c, conftest.py, package.json scripts, build.rs, SPM 플러그인).
@@ -31,23 +78,63 @@ const GIT_READ_SUBCOMMANDS: &[&str] = &["status", "diff", "log", "show"];
 /// 블록리스트와 달리 알려지지 않은 옵션·약어를 구조적으로 기각한다.
 /// 값 결합은 "옵션명=" 접두사 형태만 허용(--stat=200 O / --outpu=x X).
 const GIT_ALLOWED_OPTS: &[&str] = &[
-    "--stat", "--name-only", "--name-status", "--shortstat", "--numstat", "--oneline",
-    "--short", "--branch", "--porcelain", "--long", "--graph", "--decorate", "--no-decorate",
-    "--color", "--no-color", "--abbrev-commit", "--summary", "--patch", "--no-patch",
-    "--cached", "--staged", "--merges", "--no-merges", "--all", "--first-parent", "--reverse",
-    "--follow", "--find-renames", "--find-copies", "--pretty", "--format", "--date",
-    "-p", "-s", "-w", "-a", "-n", "-M", "-C",
+    "--stat",
+    "--name-only",
+    "--name-status",
+    "--shortstat",
+    "--numstat",
+    "--oneline",
+    "--short",
+    "--branch",
+    "--porcelain",
+    "--long",
+    "--graph",
+    "--decorate",
+    "--no-decorate",
+    "--color",
+    "--no-color",
+    "--abbrev-commit",
+    "--summary",
+    "--patch",
+    "--no-patch",
+    "--cached",
+    "--staged",
+    "--merges",
+    "--no-merges",
+    "--all",
+    "--first-parent",
+    "--reverse",
+    "--follow",
+    "--find-renames",
+    "--find-copies",
+    "--pretty",
+    "--format",
+    "--date",
+    "-p",
+    "-s",
+    "-w",
+    "-a",
+    "-n",
+    "-M",
+    "-C",
 ];
 
 fn first_word_classify(cmd: &str) -> Category {
-    const METACHARS: &[&str] = &[";", "&&", "||", "|", ">", ">>", "<", "&", "`", "$(", "\n", "\r"];
+    const METACHARS: &[&str] = &[
+        ";", "&&", "||", "|", ">", ">>", "<", "&", "`", "$(", "\n", "\r",
+    ];
     let c = cmd.trim_start();
     // 복합 명령 우회 방지: 메타문자 포함 시 무조건 External (항상 ASK)
-    if METACHARS.iter().any(|m| c.contains(m)) { return Category::External; }
+    if METACHARS.iter().any(|m| c.contains(m)) {
+        return Category::External;
+    }
     // git은 서브커맨드·옵션 화이트리스트로 별도 분류 (F-02)
     if c == "git" || c.starts_with("git ") {
         classify_git(c)
-    } else if READ_PREFIXES.iter().any(|p| c == *p || c.starts_with(&format!("{p} "))) {
+    } else if READ_PREFIXES
+        .iter()
+        .any(|p| c == *p || c.starts_with(&format!("{p} ")))
+    {
         Category::Read
     } else {
         Category::External
@@ -62,16 +149,32 @@ fn first_word_classify(cmd: &str) -> Category {
 fn classify_git(c: &str) -> Category {
     let mut toks = c.split_whitespace();
     toks.next(); // "git"
-    let Some(sub) = toks.next() else { return Category::External };
-    if !GIT_READ_SUBCOMMANDS.contains(&sub) { return Category::External; }
+    let Some(sub) = toks.next() else {
+        return Category::External;
+    };
+    if !GIT_READ_SUBCOMMANDS.contains(&sub) {
+        return Category::External;
+    }
     for t in toks {
-        if t.contains('$') { return Category::External; }
-        if t == "--" { continue; } // 옵션 종결자 — 이후 토큰은 전부 경로·피연산자로 취급
-        let Some(rest) = t.strip_prefix('-') else { continue }; // 피연산자(리비전·경로) 통과
-        if rest.is_empty() { continue; } // "-" 단독 토큰은 옵션이 아님
+        if t.contains('$') {
+            return Category::External;
+        }
+        if t == "--" {
+            continue;
+        } // 옵션 종결자 — 이후 토큰은 전부 경로·피연산자로 취급
+        let Some(rest) = t.strip_prefix('-') else {
+            continue;
+        }; // 피연산자(리비전·경로) 통과
+        if rest.is_empty() {
+            continue;
+        } // "-" 단독 토큰은 옵션이 아님
         let allowed = GIT_ALLOWED_OPTS.contains(&t)
-            || GIT_ALLOWED_OPTS.iter().any(|o| t.starts_with(&format!("{o}=")));
-        if !allowed { return Category::External; }
+            || GIT_ALLOWED_OPTS
+                .iter()
+                .any(|o| t.starts_with(&format!("{o}=")));
+        if !allowed {
+            return Category::External;
+        }
     }
     Category::Read
 }
@@ -79,20 +182,36 @@ fn classify_git(c: &str) -> Category {
 pub struct ShellExec;
 
 impl Tool for ShellExec {
-    fn name(&self) -> &'static str { "shell.exec" }
-    fn description(&self) -> &'static str { "셸 명령을 실행하고 출력을 반환" }
+    fn name(&self) -> &'static str {
+        "shell.exec"
+    }
+    fn description(&self) -> &'static str {
+        "셸 명령을 실행하고 출력을 반환"
+    }
     fn parameters_schema(&self) -> Value {
         serde_json::json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})
     }
     fn category(&self, args: &Value) -> Category {
-        args.get("command").and_then(|v| v.as_str()).map(first_word_classify).unwrap_or(Category::External)
+        args.get("command")
+            .and_then(|v| v.as_str())
+            .map(first_word_classify)
+            .unwrap_or(Category::External)
     }
     fn execute(&self, args: &Value) -> Result<String, ToolError> {
-        let command = args.get("command").and_then(|v| v.as_str()).ok_or_else(|| ToolError::Message("command 인자 누락".into()))?;
-        let out = std::process::Command::new("/bin/sh").arg("-c").arg(command).output()
+        let command = args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::Message("command 인자 누락".into()))?;
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .output()
             .map_err(|e| ToolError::Message(format!("실행 실패: {e}")))?;
         let text = String::from_utf8_lossy(&out.stdout);
         let err = String::from_utf8_lossy(&out.stderr);
-        Ok(format!("exit={} stdout:\n{} stderr:\n{}", out.status, text, err))
+        Ok(format!(
+            "exit={} stdout:\n{} stderr:\n{}",
+            out.status, text, err
+        ))
     }
 }
