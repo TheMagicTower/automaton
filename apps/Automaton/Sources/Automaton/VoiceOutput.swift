@@ -4,9 +4,8 @@ import AVFoundation
 @MainActor
 final class VoiceOutputManager {
     private let synthesizer = AVSpeechSynthesizer()
-    private let voice = AVSpeechSynthesisVoice(language: "ko-KR")
+    private let voice: AVSpeechSynthesisVoice? = VoiceOutputManager.bestKoreanVoice()
     private var buffer = ""
-    /// 음성 출력 켜기/끄기 — 기본값 UserDefaults에서 복원
     var isMuted: Bool {
         didSet { UserDefaults.standard.set(isMuted, forKey: "automaton.voiceMuted") }
     }
@@ -15,19 +14,28 @@ final class VoiceOutputManager {
         self.isMuted = UserDefaults.standard.bool(forKey: "automaton.voiceMuted")
     }
 
-    /// 스트림 델타 누적 — 종결 부호 도달 문장은 즉시 발화 큐에 삽입
+    /// 사용 가능한 최고 품질 한국어 음성 선택 — Premium > Enhanced > Compact(Yuna)
+    private static func bestKoreanVoice() -> AVSpeechSynthesisVoice? {
+        let all = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix("ko") }
+        // Premium(3) > Enhanced(2) > Default(1) 순서로 선택, 같은 품질이면 Yuna 선호
+        return all.first { $0.quality == .premium }
+            ?? all.first { $0.quality == .enhanced }
+            ?? all.first { $0.name == "Yuna" }
+            ?? all.first
+            ?? AVSpeechSynthesisVoice(language: "ko-KR")
+    }
+
     func append(delta: String) {
         guard !delta.isEmpty, !isMuted else { return }
 
         buffer += delta
         flushCompleteSentences()
-        if buffer.count > 160 { // 종결 부표 없는 장문 누적 → 청크 출력 (첫 발화 지연 방지)
+        if buffer.count > 160 {
             speak(buffer)
             buffer.removeAll()
         }
     }
 
-    /// 스트림 끝(도구 시작 등) — 잔여 버퍼 마저 발화
     func flush() {
         flushCompleteSentences()
         let rest = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -35,7 +43,6 @@ final class VoiceOutputManager {
         if !rest.isEmpty { speak(rest) }
     }
 
-    /// 새 입력 — 재생 중 발화·대기 큐 즉시 중지, 미발화 버퍼 폐기
     func interrupt() {
         synthesizer.stopSpeaking(at: .immediate)
         buffer.removeAll()
@@ -51,9 +58,12 @@ final class VoiceOutputManager {
     }
 
     private func speak(_ text: String) {
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = voice
-        synthesizer.speak(utterance) // 이미 발화 중이면 순차 큐잉
+        let u = AVSpeechUtterance(string: text)
+        u.voice = voice
+        u.rate = 0.48 // 기본값 0.5보다 약간 느리게 — 한국어 자연스러움
+        u.pitchMultiplier = 1.0
+        u.postUtteranceDelay = 0.15 // 문장 간 자연스러운 쉼
+        synthesizer.speak(u)
     }
 
     private static let terminators: Set<Character> = [".", "!", "?", "…", "。", "！", "？", "\n", ";", "~"]
