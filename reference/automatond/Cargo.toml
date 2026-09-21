@@ -18,7 +18,9 @@ serde_json.workspace = true
 tokio.workspace = true
 parking_lot.workspace = true
 async-trait.workspace = true
-
+serde.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true
 [dev-dependencies]
 automaton-core = { path = "../../crates/automaton-core" }
 automaton-policy = { path = "../../crates/automaton-policy" }
