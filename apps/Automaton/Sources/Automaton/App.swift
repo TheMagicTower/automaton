@@ -57,6 +57,7 @@ final class ShellModel {
     var memoryFacts: [String] = []
     var memoryTotal = 0
     var memoryStats: (facts: Int, sessions: Int, decisions: Int)?
+    let voiceOutput = VoiceOutputManager()
     var voiceMuted: Bool {
         get { voiceOutput.isMuted }
         set { voiceOutput.isMuted = newValue }
