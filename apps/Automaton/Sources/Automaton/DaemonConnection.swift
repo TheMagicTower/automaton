@@ -1,5 +1,4 @@
 import Foundation
-import Network
 
 enum Mode: String, Codable, CaseIterable, Sendable { case code, mac, chat }
 
@@ -7,7 +6,7 @@ struct ActionInfo: Codable, Sendable { let tool: String; let target: String; let
 struct Hint: Codable, Sendable {
     let text: String
     let similarCount: UInt
-    enum CodingKeys: String, CodingKey { case text; case similarCount = "similar_count" } // 와이어 키는 serde 스네이크케이스 (실측 결함)
+    enum CodingKeys: String, CodingKey { case text; case similarCount = "similar_count" }
 }
 
 enum ShellEvent: Codable, Sendable {
@@ -35,24 +34,24 @@ enum ShellEvent: Codable, Sendable {
         case "approval_requested": self = .approvalRequested(session: try c.decode(String.self, forKey: .session), approval: try c.decode(String.self, forKey: .approval), action: try c.decode(ActionInfo.self, forKey: .action), hint: try c.decodeIfPresent(Hint.self, forKey: .hint))
         case "draft_suggestions": self = .draftSuggestions(session: try c.decode(String.self, forKey: .session), suggestions: try c.decode([String].self, forKey: .suggestions))
         case "mode_changed": self = .modeChanged(session: try c.decode(String.self, forKey: .session), mode: try c.decode(Mode.self, forKey: .mode))
+        case "error": self = .error(session: try c.decodeIfPresent(String.self, forKey: .session), message: try c.decode(String.self, forKey: .message))
         case "usage": self = .usage(session: try c.decode(String.self, forKey: .session))
         case "summary_data": self = .summaryData(session: try c.decode(String.self, forKey: .session), summary: try c.decode(String.self, forKey: .summary))
         case "memory_data": self = .memoryData(session: try c.decodeIfPresent(String.self, forKey: .session), facts: try c.decode([String].self, forKey: .facts), total: try c.decode(Int.self, forKey: .total))
         case "memory_stats": self = .memoryStats(session: try c.decodeIfPresent(String.self, forKey: .session), facts: try c.decode(Int.self, forKey: .facts), sessions: try c.decode(Int.self, forKey: .sessions), decisions: try c.decode(Int.self, forKey: .decisions))
-        default: throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "알 수 없는 이벤트: \(type)")
+        default: throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "unknown: \(type)")
         }
     }
-    func encode(to encoder: Encoder) throws { throw EncodingError.invalidValue(self, .init(codingPath: [], debugDescription: "수신 전용")) }
+    func encode(to encoder: Encoder) throws { throw EncodingError.invalidValue(self, .init(codingPath: [], debugDescription: "recv-only")) }
 }
 
-/// 데몬 연결 — actor 직렬화, ndjson 한 줄씩 송수신.
+/// POSIX 소켓 데몬 연결 — 실제 OS Thread에서 블로킹 I/O 수행.
+/// Swift Task 협력 스레드는 블로킹 read에서 문제를 일으키므로 Thread 사용.
 actor DaemonConnection {
-    private var connection: NWConnection?
     private let socketPath: String
     private var continuation: AsyncStream<ShellEvent>.Continuation?
-    private var buffer = Data()
-    private var ready = false
-    private var pendingSends: [String] = [] // 연결 수립 전 송신 큐 — 첫 session_create 유실 방지 (리뷰 이슈 ②)
+    private var writeFD: Int32 = -1
+    private var pendingSends: [String] = []
 
     init(socketPath: String = NSString(string: "~/.local/share/automaton/automatond.sock").expandingTildeInPath) {
         self.socketPath = socketPath
@@ -61,76 +60,112 @@ actor DaemonConnection {
     func events() -> AsyncStream<ShellEvent> {
         AsyncStream { cont in
             self.continuation = cont
-            self.connect()
+            self.startThread()
         }
     }
 
-    private func connect() {
-        let conn = NWConnection(to: .unix(path: socketPath), using: .tcp)
-        connection = conn
-        conn.stateUpdateHandler = { [weak self] state in
-            FileHandle.standardError.write(Data("[automaton] CONN STATE: \(state)\n".utf8))
-            switch state {
-            case .ready:
-                Task { await self?.flushPending() }
-            case .failed(let error):
-                FileHandle.standardError.write(Data("[automaton] CONN FAILED: \(error)\n".utf8))
-                Task { await self?.handleDisconnect() }
-            default:
-                break
+    private func startThread() {
+        let path = socketPath
+        Thread.detachNewThread { [weak self] in
+            guard let self else { return }
+            self.posixReadLoop(path: path, conn: self)
+        }
+    }
+
+    /// 실제 OS 스레드에서 실행 — 블로킹 recv 안전
+    private nonisolated func posixReadLoop(path: String, conn: DaemonConnection) {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8)
+        guard bytes.count < 104 else { close(fd); return }
+        withUnsafeMutableBytes(of: &addr.sun_path) { $0.copyBytes(from: bytes) }
+        let rc = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        receiveLoop(conn)
-        conn.start(queue: .global(qos: .userInitiated))
+        guard rc == 0 else { close(fd); return }
+
+        FileHandle.standardError.write(Data("[automaton] POSIX connected fd=\(fd)\n".utf8))
+
+        // Actor에 fd 설정 + 큐 플러시 (동기 대기)
+        let sem = DispatchSemaphore(value: 0)
+        Task { await conn.setFDAndFlush(fd); sem.signal() }
+        sem.wait()
+
+        FileHandle.standardError.write(Data("[automaton] READ LOOP start fd=\(fd)\n".utf8))
+
+        var buffer = Data()
+        var buf = [UInt8](repeating: 0, count: 65536)
+        while true {
+            let n = recv(fd, &buf, buf.count, 0)
+            if n <= 0 {
+                FileHandle.standardError.write(Data("[automaton] recv EOF/err errno=\(errno)\n".utf8))
+                break
+            }
+            buffer.append(contentsOf: buf[0..<n])
+            FileHandle.standardError.write(Data("[automaton] RECV \(n) bytes\n".utf8))
+
+            // 개행 단위 이벤트 파싱
+            while let nl = buffer.firstIndex(of: 0x0A) {
+                let line = String(data: Data(buffer[buffer.startIndex..<nl]), encoding: .utf8) ?? ""
+                buffer = Data(buffer[buffer.index(after: nl)...])
+                guard !line.isEmpty else { continue }
+
+                if let data = line.data(using: .utf8),
+                   let ev = try? JSONDecoder().decode(ShellEvent.self, from: data) {
+                    Task { await conn.yieldEvent(ev) }
+                }
+            }
+        }
+
+        close(fd)
+        Task { await conn.disconnected() }
     }
 
-    private func flushPending() {
-        ready = true
-        for json in pendingSends { send(json) }
+    // Actor 메서드들
+
+    func setFDAndFlush(_ fd: Int32) {
+        writeFD = fd
+        for json in pendingSends { rawWrite(json) }
         pendingSends.removeAll()
     }
 
-    private func handleDisconnect() {
-        ready = false // 재접속 대비 큐 의미 보존 (리뷰 자문)
+    func yieldEvent(_ ev: ShellEvent) {
+        continuation?.yield(ev)
+    }
+
+    func disconnected() {
         continuation?.finish()
         continuation = nil
-        connection = nil
+        writeFD = -1
     }
 
-    private func receiveLoop(_ conn: NWConnection) {
-        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, done, error in
-            guard let self else { return }
-            if let data { Task { await self.consume(data) } }
-            if error != nil || done { Task { await self.handleDisconnect() } }
-        }
-    }
-
-    private func consume(_ data: Data) {
-        buffer.append(data)
-        while let nl = buffer.firstIndex(of: 0x0A) {
-            let line = Data(buffer[buffer.startIndex..<nl])
-            buffer = buffer[buffer.index(after: nl)...]
-            guard let ev = try? JSONDecoder().decode(ShellEvent.self, from: line) else {
-                FileHandle.standardError.write(Data("[automaton] DECODE FAIL: \(String(data: line, encoding: .utf8)?.prefix(120) ?? "?")\n".utf8))
-                continue
+    private func rawWrite(_ json: String) {
+        guard writeFD >= 0, let data = (json + "\n").data(using: .utf8) else { return }
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            var sent = 0
+            while sent < raw.count {
+                let n = write(writeFD, raw.baseAddress!.advanced(by: sent), raw.count - sent)
+                if n <= 0 { break }
+                sent += n
             }
-            if case .approvalRequested = ev {
-                FileHandle.standardError.write(Data("[automaton] APPROVAL RECEIVED\n".utf8))
-            }
-            continuation?.yield(ev)
         }
     }
 
     func send(_ json: String) {
-        guard ready else { pendingSends.append(json); return } // ready 전 송신은 큐잉 — 조용한 드롭 방지
-        guard let conn = connection, let data = (json + "\n").data(using: .utf8) else { return }
-        conn.send(content: data, completion: .contentProcessed { _ in })
+        guard writeFD >= 0 else { pendingSends.append(json); return }
+        rawWrite(json)
     }
+
     func sendRequest(method: String, params: [String: Any]) {
-        // params 없는 요청(memory_stats 등 unit variant)은 params 키 자체를 실어 보내지 않는다 —
-        // 데몬 serde(tag+content)는 unit variant의 비어 있지 않은 params를 거부한다.
         let payload: [String: Any] = params.isEmpty ? ["method": method] : ["method": method, "params": params]
         if let data = try? JSONSerialization.data(withJSONObject: payload),
-           let s = String(data: data, encoding: .utf8) { send(s) }
+           let s = String(data: data, encoding: .utf8) {
+            send(s)
+        }
     }
 }
