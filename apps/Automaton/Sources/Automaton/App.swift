@@ -57,7 +57,10 @@ final class ShellModel {
     var memoryFacts: [String] = []
     var memoryTotal = 0
     var memoryStats: (facts: Int, sessions: Int, decisions: Int)?
-    let voiceOutput = VoiceOutputManager()
+    var voiceMuted: Bool {
+        get { voiceOutput.isMuted }
+        set { voiceOutput.isMuted = newValue }
+    }
     private let conn = DaemonConnection()
     private var session: String {
         didSet { UserDefaults.standard.set(session, forKey: "automaton.session") }
@@ -196,8 +199,8 @@ final class ShellModel {
                 schedulePersist()
             } else {
                 appendDelta(delta)
+                voiceOutput.append(delta: delta) // 실시간 응답만 TTS — 이력 복원은 읽지 않음
             }
-            voiceOutput.append(delta: delta)
         case .toolStarted(_, _, let summary):
             isThinking = true // 툴 실행 중 인디케이터 — 셸 명령 등 장시간 실행 시각화
             appendEntry(.tool, "⚙ \(summary)")
@@ -500,20 +503,18 @@ struct ShellView: View {
                 .foregroundStyle(voiceInput.enabled ? Theme.gold : Theme.dim)
         }
         .buttonStyle(.plain)
-        .help(voiceInput.statusNote ?? (voiceInput.enabled ? "Push-to-Talk: Cmd+Shift+Space 길게 눌러 말하기" : "음성 입력 켜기"))
     }
 
-    /// TTS 음성 출력 켜기/끄기 — 🔊/🔇 토글, UserDefaults 영속화
     private var speakerToggle: some View {
         Button {
-            model.voiceOutput.isMuted.toggle()
+            model.voiceMuted.toggle()
         } label: {
-            Image(systemName: model.voiceOutput.isMuted ? "speaker.slash" : "speaker.wave.2")
+            Image(systemName: model.voiceMuted ? "speaker.slash" : "speaker.wave.2")
                 .font(.system(size: 13))
-                .foregroundStyle(model.voiceOutput.isMuted ? Theme.dim : Theme.gold)
+                .foregroundStyle(model.voiceMuted ? Theme.dim : Theme.gold)
         }
         .buttonStyle(.plain)
-        .help(model.voiceOutput.isMuted ? "음성 출력 켜기" : "음성 출력 끄기")
+        .help(model.voiceMuted ? "음성 출력 켜기" : "음성 출력 끄기")
     }
 
     /// §6 3단계 답변 초안 칩 — 클릭하면 입력창에 해당 텍스트가 채워진다(전송은 사용자 몫).
