@@ -6,10 +6,19 @@ final class VoiceOutputManager {
     private let synthesizer = AVSpeechSynthesizer()
     private let voice = AVSpeechSynthesisVoice(language: "ko-KR")
     private var buffer = ""
+    /// 음성 출력 켜기/끄기 — 기본값 UserDefaults에서 복원
+    var isMuted: Bool {
+        didSet { UserDefaults.standard.set(isMuted, forKey: "automaton.voiceMuted") }
+    }
+
+    init() {
+        self.isMuted = UserDefaults.standard.bool(forKey: "automaton.voiceMuted")
+    }
 
     /// 스트림 델타 누적 — 종결 부호 도달 문장은 즉시 발화 큐에 삽입
     func append(delta: String) {
-        guard !delta.isEmpty else { return }
+        guard !delta.isEmpty, !isMuted else { return }
+
         buffer += delta
         flushCompleteSentences()
         if buffer.count > 160 { // 종결 부표 없는 장문 누적 → 청크 출력 (첫 발화 지연 방지)

@@ -474,6 +474,7 @@ struct ShellView: View {
 
             voiceStatus
             voiceToggle
+            speakerToggle
         }.padding(10)
     }
 
@@ -500,6 +501,19 @@ struct ShellView: View {
         }
         .buttonStyle(.plain)
         .help(voiceInput.statusNote ?? (voiceInput.enabled ? "Push-to-Talk: Cmd+Shift+Space 길게 눌러 말하기" : "음성 입력 켜기"))
+    }
+
+    /// TTS 음성 출력 켜기/끄기 — 🔊/🔇 토글, UserDefaults 영속화
+    private var speakerToggle: some View {
+        Button {
+            model.voiceOutput.isMuted.toggle()
+        } label: {
+            Image(systemName: model.voiceOutput.isMuted ? "speaker.slash" : "speaker.wave.2")
+                .font(.system(size: 13))
+                .foregroundStyle(model.voiceOutput.isMuted ? Theme.dim : Theme.gold)
+        }
+        .buttonStyle(.plain)
+        .help(model.voiceOutput.isMuted ? "음성 출력 켜기" : "음성 출력 끄기")
     }
 
     /// §6 3단계 답변 초안 칩 — 클릭하면 입력창에 해당 텍스트가 채워진다(전송은 사용자 몫).
