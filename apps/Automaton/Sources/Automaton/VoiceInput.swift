@@ -12,7 +12,11 @@ final class VoiceInputManager {
 
     private(set) var state: VoiceState = .idle
     private(set) var enabled = false
-    /// 권한/환경 문제 설명 — 음성 토글 버튼 툴팁으로 노출
+    /// 현재 화자 — 보이스프린트 식별 결과
+    var speakerName: String?
+    var speakerConfidence: Double = 0
+    /// 미등록 화자 특징 — 자동 등록 대기
+    var pendingEnrollment: [Double]?
     var statusNote: String?
 
     /// 인식 완료 문장 전달 (ShellModel.send 연결)
@@ -91,8 +95,26 @@ final class VoiceInputManager {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { statusNote = "입력 오디오 장치 없음"; return }
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in req.append(buffer) }
-        tapInstalled = true
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
+            req.append(buffer)
+            // 화자 검증 — 등록된 보이스프린트와 비교
+            let features = VoicePrintManager.shared.extractFeatures(from: buffer)
+            if !features.isEmpty {
+                let identified = VoicePrintManager.shared.identify(features: features)
+                if identified == nil && VoicePrintManager.shared.hasPrints {
+                    // 미등록 화자 — 자동 등록 프롬프트
+                    Task { @MainActor in
+                        self.statusNote = "미등록 화자 감지 — 확인 중..."
+                        self.pendingEnrollment = features
+                    }
+                } else if let id = identified {
+                    Task { @MainActor in
+                        self.speakerName = id.name
+                        self.speakerConfidence = id.confidence
+                    }
+                }
+            }
+        }
         do {
             engine.prepare()
             try engine.start()
