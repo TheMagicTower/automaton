@@ -155,8 +155,8 @@ actor DaemonConnection {
             }
         }
     }
-
     func send(_ json: String) {
+        FileHandle.standardError.write(Data("[automaton] SEND: fd=\(writeFD) \(json.prefix(50))\n".utf8))
         guard writeFD >= 0 else { pendingSends.append(json); return }
         rawWrite(json)
     }

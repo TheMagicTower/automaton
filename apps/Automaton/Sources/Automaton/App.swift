@@ -276,6 +276,7 @@ final class ShellModel {
         isThinking = true
         historyPending = false
         appendEntry(.user, trimmed)
+        Task { await conn.sendRequest(method: "message_send", params: ["session": session, "text": trimmed]) }
     }
 
     func requestMode(_ to: Mode) {
