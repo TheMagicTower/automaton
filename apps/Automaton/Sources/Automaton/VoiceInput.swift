@@ -69,6 +69,15 @@ final class VoiceInputManager {
         Task { await prepare() } // 성공 시 enabled = true
     }
 
+    /// 클릭 토글 — 마이크 아이콘 클릭으로 청취 시작/종료 (3키 핫키 대신 주요 인터페이스)
+    func toggleListening() {
+        if state == .listening {
+            hotkeyUp() // 말 끝 — 전송
+        } else if state == .idle {
+            hotkeyDown() // 청취 시작
+        }
+    }
+
     func hotkeyDown() {
         guard enabled, state == .idle, let recognizer else { return }
         onListeningStart?()

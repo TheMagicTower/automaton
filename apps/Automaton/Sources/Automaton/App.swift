@@ -494,16 +494,16 @@ struct ShellView: View {
         .font(.system(size: 10, design: .monospaced))
         .foregroundStyle(Theme.ivory)
     }
-
     private var voiceToggle: some View {
         Button {
-            voiceInput.setEnabled(!voiceInput.enabled)
+            voiceInput.toggleListening() // 클릭으로 청취 시작/종료 — 핫키 불필요
         } label: {
-            Image(systemName: voiceInput.enabled ? "mic.fill" : "mic.slash")
+            Image(systemName: voiceInput.state == .listening ? "mic.fill.badge.xmark" : voiceInput.enabled ? "mic.fill" : "mic.slash")
                 .font(.system(size: 13))
-                .foregroundStyle(voiceInput.enabled ? Theme.gold : Theme.dim)
+                .foregroundStyle(voiceInput.state == .listening ? .red : voiceInput.enabled ? Theme.gold : Theme.dim)
         }
         .buttonStyle(.plain)
+        .help(voiceInput.state == .listening ? "클릭해서 말 끝내기" : "클릭하고 말하기")
     }
 
     private var speakerToggle: some View {
