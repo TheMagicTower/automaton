@@ -14,7 +14,7 @@ enum AutomatonEntry {
 
     static func main() {
         let app = NSApplication.shared
-        app.setActivationPolicy(.accessory) // 메뉴바 전용, Dock 아이콘 없음
+        app.setActivationPolicy(.regular) // Dock 아이콘 + 메뉴바
 
         let delegate = AutomatonAppDelegate()
         AutomatonEntry.retained = delegate // strong ref — delegate 조기 해제 방지
@@ -31,9 +31,8 @@ final class AutomatonAppDelegate: NSObject, NSApplicationDelegate {
     private let voiceInput = VoiceInputManager()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // MenuBarExtra 대신 NSStatusItem + NSPopover 사용
-        // (키보드 입력 무반응 + 클릭 시 자동 닫힘 결함 해결)
         menuBar.setup(model: model, voiceInput: voiceInput)
+        // 창은 유저가 직접 열게 — 자동 열기는 타이밍 크래시 유발
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

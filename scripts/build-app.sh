@@ -30,17 +30,22 @@ cat > "$BUNDLE/Contents/Info.plist" << 'PLIST'
     <string>Automaton</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>Automaton</string>
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
     <key>LSUIElement</key>
-    <true/>
+    <false/>
     <key>NSMicrophoneUsageDescription</key>
     <string>음성 명령 인식을 위해 마이크 접근이 필요합니다.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>음성 인식으로 사용자의 말을 텍스트로 변환합니다.</string>
 </dict>
 </plist>
 PLIST
 
 # 5. 아이콘 (기본 시스템 아이콘 사용 — 커스텀 아이콘은 후속)
+cp /tmp/Automaton.icns "$BUNDLE/Contents/Resources/Automaton.icns" 2>/dev/null || echo "icon not found"
 # TODO: 커스텀 Brass & Glass 아이콘 생성
 
 echo "✅ $BUNDLE 생성 완료"

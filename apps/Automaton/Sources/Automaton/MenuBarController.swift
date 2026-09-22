@@ -105,7 +105,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate, NSWindowDelegate {
 
     // MARK: - 창 모드 (⌘Tab 전환 지원)
 
-    @objc private func showWindowAction() {
+    @objc func showWindowAction() {
         if let window = mainWindow {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
