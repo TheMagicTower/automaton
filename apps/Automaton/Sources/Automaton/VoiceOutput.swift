@@ -15,15 +15,18 @@ final class VoiceOutputManager {
             }
         }
     }
-
     init() {
         self.isMuted = UserDefaults.standard.bool(forKey: "automaton.voiceMuted")
     }
 
-    /// 사용 가능한 최고 품질 한국어 음성 선택 — Premium > Enhanced > Compact(Yuna)
+    /// Premium 음성 식별자로 직접 지정 — 품질 검색보다 확실
     private static func bestKoreanVoice() -> AVSpeechSynthesisVoice? {
+        // 1순위: 식별자 직접 지정 (가장 확실)
+        if let premium = AVSpeechSynthesisVoice(identifier: "com.apple.voice.premium.ko-KR.Yuna") {
+            return premium
+        }
+        // 2순위: 품질 기반 선택
         let all = AVSpeechSynthesisVoice.speechVoices().filter { $0.language.hasPrefix("ko") }
-        // Premium(3) > Enhanced(2) > Default(1) 순서로 선택, 같은 품질이면 Yuna 선호
         return all.first { $0.quality == .premium }
             ?? all.first { $0.quality == .enhanced }
             ?? all.first { $0.name == "Yuna" }
