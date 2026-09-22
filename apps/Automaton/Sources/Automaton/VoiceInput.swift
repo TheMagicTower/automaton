@@ -97,23 +97,8 @@ final class VoiceInputManager {
         guard format.sampleRate > 0, format.channelCount > 0 else { statusNote = "입력 오디오 장치 없음"; return }
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
             req.append(buffer)
-            // 화자 검증 — 등록된 보이스프린트와 비교
-            let features = VoicePrintManager.shared.extractFeatures(from: buffer)
-            if !features.isEmpty {
-                let identified = VoicePrintManager.shared.identify(features: features)
-                if identified == nil && VoicePrintManager.shared.hasPrints {
-                    // 미등록 화자 — 자동 등록 프롬프트
-                    Task { @MainActor in
-                        self.statusNote = "미등록 화자 감지 — 확인 중..."
-                        self.pendingEnrollment = features
-                    }
-                } else if let id = identified {
-                    Task { @MainActor in
-                        self.speakerName = id.name
-                        self.speakerConfidence = id.confidence
-                    }
-                }
-            }
+            // VoicePrint 비활성화 — 오디오 탭 콜백에서 무거운 계산이 segfault 유발
+            // 재활성화 시 별도 스레드 + 버퍼 복사 필요
         }
         do {
             engine.prepare()

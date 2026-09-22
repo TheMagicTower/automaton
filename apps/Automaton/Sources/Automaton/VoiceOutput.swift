@@ -7,7 +7,13 @@ final class VoiceOutputManager {
     private let voice: AVSpeechSynthesisVoice? = VoiceOutputManager.bestKoreanVoice()
     private var buffer = ""
     var isMuted: Bool {
-        didSet { UserDefaults.standard.set(isMuted, forKey: "automaton.voiceMuted") }
+        didSet {
+            UserDefaults.standard.set(isMuted, forKey: "automaton.voiceMuted")
+            if !isMuted {
+                // 뮤트 해제 시 신디사이저 리셋 — 중단된 큐 정리
+                synthesizer.stopSpeaking(at: .immediate)
+            }
+        }
     }
 
     init() {
@@ -58,12 +64,15 @@ final class VoiceOutputManager {
     }
 
     private func speak(_ text: String) {
+        guard !isMuted else { return }
         let u = AVSpeechUtterance(string: text)
         u.voice = voice
-        u.rate = 0.48 // 기본값 0.5보다 약간 느리게 — 한국어 자연스러움
+        u.rate = 0.48
         u.pitchMultiplier = 1.0
-        u.postUtteranceDelay = 0.15 // 문장 간 자연스러운 쉼
+        u.postUtteranceDelay = 0.15
+        u.volume = 1.0 // 명시적 볼륨
         synthesizer.speak(u)
+        FileHandle.standardError.write(Data("[automaton] TTS: \"\(text.prefix(30))\" voice=\(voice?.name ?? "nil")\n".utf8))
     }
 
     private static let terminators: Set<Character> = [".", "!", "?", "…", "。", "！", "？", "\n", ";", "~"]
