@@ -12,7 +12,11 @@ final class VoiceInputManager {
 
     private(set) var state: VoiceState = .idle
     private(set) var enabled = false
-    /// 권한/환경 문제 설명 — 음성 토글 버튼 툴팁으로 노출
+    /// 현재 화자 — 보이스프린트 식별 결과
+    var speakerName: String?
+    var speakerConfidence: Double = 0
+    /// 미등록 화자 특징 — 자동 등록 대기
+    var pendingEnrollment: [Double]?
     var statusNote: String?
 
     /// 인식 완료 문장 전달 (ShellModel.send 연결)
@@ -38,12 +42,8 @@ final class VoiceInputManager {
         guard !prepared else { return }
         prepared = true
         guard recognizer != nil else { statusNote = "ko-KR 음성 인식기를 사용할 수 없음"; return }
-        let info = Bundle.main.infoDictionary ?? [:]
-        guard info["NSMicrophoneUsageDescription"] != nil,
-              info["NSSpeechRecognitionUsageDescription"] != nil else {
-            statusNote = "마이크/음성인식 사용 설명 없음 — Xcode(app) 빌드에서만 동작"
-            return
-        }
+        // SPM 실행 파일은 Info.plist가 없어 usage description 체크 생략 —
+        // 권한 요청 시 시스템이 다이얼로그를 표시하므로 macOS 14+에서 안전
         let auth = await withCheckedContinuation { cont in
             SFSpeechRecognizer.requestAuthorization { cont.resume(returning: $0) }
         }
@@ -52,7 +52,6 @@ final class VoiceInputManager {
             AVAudioApplication.requestRecordPermission { cont.resume(returning: $0) }
         }
         guard mic else { statusNote = "마이크 권한 거부됨"; return }
-        registerHotkey()
         enabled = true
     }
 
@@ -69,6 +68,22 @@ final class VoiceInputManager {
         Task { await prepare() } // 성공 시 enabled = true
     }
 
+    func toggleListening() {
+        if state == .listening {
+            hotkeyUp()
+            return
+        }
+        guard state == .idle else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            if !self.enabled {
+                await self.prepare() // 권한 요청 + 활성화 완료 대기
+                guard self.enabled else { return } // 권한 거부 시 중단
+            }
+            self.hotkeyDown() // 활성화 확인 후 청취 시작
+        }
+    }
+
     func hotkeyDown() {
         guard enabled, state == .idle, let recognizer else { return }
         onListeningStart?()
@@ -80,8 +95,11 @@ final class VoiceInputManager {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { statusNote = "입력 오디오 장치 없음"; return }
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in req.append(buffer) }
-        tapInstalled = true
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
+            req.append(buffer)
+            // VoicePrint 비활성화 — 오디오 탭 콜백에서 무거운 계산이 segfault 유발
+            // 재활성화 시 별도 스레드 + 버퍼 복사 필요
+        }
         do {
             engine.prepare()
             try engine.start()

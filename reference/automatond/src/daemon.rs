@@ -57,7 +57,7 @@ pub struct Daemon {
     summary_blocks: Mutex<HashMap<String, String>>,
     /// 세션 종료 판정 유휴 시간 — 마지막 메시지 후 이 시간 경과 시 요약 (기본 30초, 테스트 단축)
     pub summary_idle: Duration,
-    /// 승인 id → (발행 세션, 툴, 타깃) — 세션 바인딩 검증(F-03) + "항상 허용" 스코프·팬텀 id 차단(§5) + 저널 target 공급(§6)
+    pub typesafe: Option<crate::typesafe::TypeSafeClient>,
     pending_asks: Mutex<HashMap<String, (String, String, String)>>,
     /// 데몬 전역 승인 id 발급기 — 루프의 턴 로컬 seq 충돌 방지
     approval_seq: std::sync::atomic::AtomicU64,
@@ -78,6 +78,8 @@ impl Daemon {
         });
         let store = MemoryStore::open(&paths.memory()).expect("메모리 DB 열기 실패");
         let apprentice = Apprentice::open(&paths.memory()).expect("Apprentice DB 열기 실패");
+        let typesafe = crate::typesafe::TypeSafeClient::from_env();
+        if typesafe.is_some() { eprintln!("[automaton] TypeSafe enabled — semantic approval prediction active"); }
         let gate = Arc::new(SessionGate::new());
         Daemon {
             provider,
@@ -85,6 +87,7 @@ impl Daemon {
             gate,
             engine: Mutex::new(engine),
             apprentice,
+            typesafe,
             store,
             sessions: Mutex::new(HashMap::new()),
             last_activity: Mutex::new(HashMap::new()),
@@ -388,7 +391,28 @@ impl Daemon {
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 );
                 if let Some(h) = self.apprentice.hint_for(action).ok().flatten() {
-                    *hint = Some(h); // 힌트는 별도 필드로만 전달 — risk 변형 시 배너 이중 표시 (리뷰 자문)
+                    *hint = Some(h);
+                }
+                // TypeSafe 의미적 승인 예측 — 토큰 중첩과 결합
+                if let Some(ts) = &self.typesafe {
+                    let past: Vec<(String, String, String)> = self.store
+                        .decisions_by_tool(&action.tool)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .rev()
+                        .take(10)
+                        .map(|d| (d.tool, d.target, d.decision))
+                        .collect();
+                    if !past.is_empty() {
+                        if let Ok(p) = ts.approval_probability(&action.tool, &action.target, &past).await {
+                            let base = hint.as_ref().map_or(0.0, |h| h.similar_count as f64 * 0.2);
+                            let combined = (p * 0.7 + base * 0.3).min(1.0);
+                            *hint = Some(automaton_proto::Hint {
+                                text: format!("승인 예측 {:.0}% (의미 유사도 + 이력)", combined * 100.0),
+                                similar_count: (combined * 10.0) as u32,
+                            });
+                        }
+                    }
                 }
                 if let Some(s) = &session {
                     self.pending_asks.lock().insert(

@@ -14,7 +14,7 @@ enum AutomatonEntry {
 
     static func main() {
         let app = NSApplication.shared
-        app.setActivationPolicy(.accessory) // 메뉴바 전용, Dock 아이콘 없음
+        app.setActivationPolicy(.regular) // Dock 아이콘 + 메뉴바
 
         let delegate = AutomatonAppDelegate()
         AutomatonEntry.retained = delegate // strong ref — delegate 조기 해제 방지
@@ -31,9 +31,8 @@ final class AutomatonAppDelegate: NSObject, NSApplicationDelegate {
     private let voiceInput = VoiceInputManager()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // MenuBarExtra 대신 NSStatusItem + NSPopover 사용
-        // (키보드 입력 무반응 + 클릭 시 자동 닫힘 결함 해결)
         menuBar.setup(model: model, voiceInput: voiceInput)
+        // 창은 유저가 직접 열게 — 자동 열기는 타이밍 크래시 유발
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -58,6 +57,10 @@ final class ShellModel {
     var memoryTotal = 0
     var memoryStats: (facts: Int, sessions: Int, decisions: Int)?
     let voiceOutput = VoiceOutputManager()
+    var voiceMuted: Bool {
+        get { voiceOutput.isMuted }
+        set { voiceOutput.isMuted = newValue }
+    }
     private let conn = DaemonConnection()
     private var session: String {
         didSet { UserDefaults.standard.set(session, forKey: "automaton.session") }
@@ -72,14 +75,14 @@ final class ShellModel {
     var currentSessionID: String { session }
 
     init() {
-        // 저장된 세션 재사용 — 재시작해도 대화 맥락 유지
         let saved = UserDefaults.standard.string(forKey: "automaton.session")
         self.session = saved ?? "shell-\(UInt64(Date().timeIntervalSince1970))"
-        // 세션 목록 복원 — 현재 세션 캐시를 즉시 표시(데몬 history 도착 시 대체)
         self.sessions = SessionStore.load()
         if let rec = sessions.first(where: { $0.id == session }) {
             self.stream = rec.entries
         }
+        // 즉시 연결 — .onAppear 대기 없이 데몬 이벤트 수신 보장
+        start()
     }
 
     /// 새 세션 — 기존 대화 스트림 클리어 + 새 세션 ID로 재연결
@@ -196,8 +199,8 @@ final class ShellModel {
                 schedulePersist()
             } else {
                 appendDelta(delta)
+                voiceOutput.append(delta: delta) // 실시간 응답만 TTS — 이력 복원은 읽지 않음
             }
-            voiceOutput.append(delta: delta)
         case .toolStarted(_, _, let summary):
             isThinking = true // 툴 실행 중 인디케이터 — 셸 명령 등 장시간 실행 시각화
             appendEntry(.tool, "⚙ \(summary)")
@@ -276,6 +279,7 @@ final class ShellModel {
         isThinking = true
         historyPending = false
         appendEntry(.user, trimmed)
+        Task { await conn.sendRequest(method: "message_send", params: ["session": session, "text": trimmed]) }
     }
 
     func requestMode(_ to: Mode) {
@@ -473,6 +477,7 @@ struct ShellView: View {
 
             voiceStatus
             voiceToggle
+            speakerToggle
         }.padding(10)
     }
 
@@ -488,17 +493,28 @@ struct ShellView: View {
         .font(.system(size: 10, design: .monospaced))
         .foregroundStyle(Theme.ivory)
     }
-
     private var voiceToggle: some View {
         Button {
-            voiceInput.setEnabled(!voiceInput.enabled)
+            voiceInput.toggleListening() // 클릭으로 청취 시작/종료 — 핫키 불필요
         } label: {
-            Image(systemName: voiceInput.enabled ? "mic.fill" : "mic.slash")
+            Image(systemName: voiceInput.state == .listening ? "mic.fill.badge.xmark" : voiceInput.enabled ? "mic.fill" : "mic.slash")
                 .font(.system(size: 13))
-                .foregroundStyle(voiceInput.enabled ? Theme.gold : Theme.dim)
+                .foregroundStyle(voiceInput.state == .listening ? .red : voiceInput.enabled ? Theme.gold : Theme.dim)
         }
         .buttonStyle(.plain)
-        .help(voiceInput.statusNote ?? (voiceInput.enabled ? "Push-to-Talk: Cmd+Shift+Space 길게 눌러 말하기" : "음성 입력 켜기"))
+        .help(voiceInput.state == .listening ? "클릭해서 말 끝내기" : "클릭하고 말하기")
+    }
+
+    private var speakerToggle: some View {
+        Button {
+            model.voiceMuted.toggle()
+        } label: {
+            Image(systemName: model.voiceMuted ? "speaker.slash" : "speaker.wave.2")
+                .font(.system(size: 13))
+                .foregroundStyle(model.voiceMuted ? Theme.dim : Theme.gold)
+        }
+        .buttonStyle(.plain)
+        .help(model.voiceMuted ? "음성 출력 켜기" : "음성 출력 끄기")
     }
 
     /// §6 3단계 답변 초안 칩 — 클릭하면 입력창에 해당 텍스트가 채워진다(전송은 사용자 몫).
